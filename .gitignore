@@ -1,0 +1,34 @@
+# Build artefacts
+/target/
+# Cargo.lock is intentionally committed for binary crates (pinned reproducible builds)
+
+# Cargo audit / deny cache
+~/.cargo/advisory-db/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Vault and user data (never commit)
+*.op4
+*.op4.tmp
+vault.op4
+vault.op4.tmp
+
+# Secrets and credentials
+.env
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Build scripts output
+/install/.built
