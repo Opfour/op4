@@ -15,8 +15,7 @@ use crate::error::HardeningError;
 /// Default action: KillProcess (SIGSYS) for any syscall not in the allowlist.
 pub fn install_seccomp_filter() -> Result<(), HardeningError> {
     let filter = build_filter().map_err(HardeningError::SeccompBuild)?;
-    seccompiler::apply_filter(&filter)
-        .map_err(|e| HardeningError::SeccompInstall(e.to_string()))
+    seccompiler::apply_filter(&filter).map_err(|e| HardeningError::SeccompInstall(e.to_string()))
 }
 
 fn build_filter() -> Result<BpfProgram, String> {

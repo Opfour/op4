@@ -34,8 +34,10 @@ pub fn render_conversation(
                 ("Them ", Style::default().fg(Color::White))
             };
             // Counter shown instead of timestamp
-            let counter_span =
-                Span::styled(format!("[#{:06}] ", m.counter), Style::default().fg(Color::DarkGray));
+            let counter_span = Span::styled(
+                format!("[#{:06}] ", m.counter),
+                Style::default().fg(Color::DarkGray),
+            );
             let prefix_span = Span::styled(prefix, style.add_modifier(Modifier::BOLD));
             let content_span = Span::styled(content, style);
             ListItem::new(Line::from(vec![counter_span, prefix_span, content_span]))
@@ -43,16 +45,14 @@ pub fn render_conversation(
         .collect();
 
     let title = format!(" {} ", sanitize_for_display(contact_name));
-    let msg_list = List::new(items)
-        .block(Block::default().borders(Borders::ALL).title(title));
+    let msg_list = List::new(items).block(Block::default().borders(Borders::ALL).title(title));
     f.render_widget(msg_list, chunks[0]);
 
     // Input draft area
-    let input = Paragraph::new(sanitize_for_display(draft))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Message (Enter to send, Esc to cancel)"),
-        );
+    let input = Paragraph::new(sanitize_for_display(draft)).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title("Message (Enter to send, Esc to cancel)"),
+    );
     f.render_widget(input, chunks[1]);
 }

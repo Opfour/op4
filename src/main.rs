@@ -19,6 +19,7 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
+use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair};
 use crate::error::{AppError, VaultError};
 use crate::hardening::memory::apply_memory_hardening;
 use crate::hardening::seccomp::install_seccomp_filter;
@@ -197,7 +198,15 @@ fn create_new_vault(vault_path: &std::path::Path) -> Result<VaultUnlocked, AppEr
     eprintln!();
     eprintln!("Generating vault (Argon2id — this takes a few seconds)...");
 
-    let vault = VaultUnlocked::create(vault_path, normal_pp.as_bytes(), duress_pp.as_bytes())?;
+    let mut vault = VaultUnlocked::create(vault_path, normal_pp.as_bytes(), duress_pp.as_bytes())?;
+
+    // Generate identity keypairs and store them in the vault.
+    eprintln!("Generating identity keypairs...");
+    let kem_keypair = HybridKemKeypair::generate();
+    let signing_keypair = HybridSigningKeypair::generate();
+    vault.payload.identity_kem_secret = kem_keypair.to_bytes();
+    vault.payload.identity_signing_secret = signing_keypair.to_bytes();
+    vault.save().map_err(AppError::from)?;
 
     eprintln!("Vault created: {}", vault_path.display());
     eprintln!();
@@ -232,8 +241,7 @@ fn restore_terminal(terminal: &mut Term) {
 // ─── Vault Path ───────────────────────────────────────────────────────────────
 
 fn get_vault_path() -> io::Result<PathBuf> {
-    let home =
-        std::env::var("HOME").unwrap_or_else(|_| "/root".into());
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     Ok(PathBuf::from(home)
         .join(".local")
         .join("share")

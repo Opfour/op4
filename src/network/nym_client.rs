@@ -110,14 +110,12 @@ impl NymClient {
         let hs_key_b64 = base64_encode_standard(&hs_key);
 
         // ── 2. Authenticate with the Tor control port ─────────────────────────
-        let mut control = TcpStream::connect(TOR_CONTROL_ADDR)
-            .await
-            .map_err(|e| {
-                NetworkError::NymInit(format!(
-                    "Cannot connect to Tor control port {TOR_CONTROL_ADDR}: {e}. \
+        let mut control = TcpStream::connect(TOR_CONTROL_ADDR).await.map_err(|e| {
+            NetworkError::NymInit(format!(
+                "Cannot connect to Tor control port {TOR_CONTROL_ADDR}: {e}. \
                      Add 'ControlPort 9051' to /etc/tor/torrc and restart Tor."
-                ))
-            })?;
+            ))
+        })?;
         tor_authenticate(&mut control).await?;
 
         // ── 3. Create the v3 hidden service ───────────────────────────────────
@@ -223,8 +221,8 @@ async fn tor_authenticate(control: &mut TcpStream) -> Result<(), NetworkError> {
     let info = read_tor_response(control).await?;
 
     let authenticated = if info.contains("COOKIE") || info.contains("SAFECOOKIE") {
-        let cookie_path = extract_cookie_path(&info)
-            .unwrap_or_else(|| "/run/tor/control.authcookie".into());
+        let cookie_path =
+            extract_cookie_path(&info).unwrap_or_else(|| "/run/tor/control.authcookie".into());
         if let Ok(cookie) = tokio::fs::read(&cookie_path).await {
             let hex = bytes_to_hex(&cookie);
             let cmd = format!("AUTHENTICATE {hex}\r\n");
@@ -315,7 +313,9 @@ async fn read_tor_response(stream: &mut TcpStream) -> Result<String, NetworkErro
         }
 
         if acc.len() > 8192 {
-            return Err(NetworkError::NymInit("Tor control response overflow".into()));
+            return Err(NetworkError::NymInit(
+                "Tor control response overflow".into(),
+            ));
         }
     }
 }
@@ -414,9 +414,7 @@ async fn socks5_connect(socks_addr: &str, target: &str) -> std::io::Result<TcpSt
 
 /// Write `[4-byte BE u32 length][data]` to `stream`.
 async fn write_frame(stream: &mut TcpStream, data: &[u8]) -> std::io::Result<()> {
-    stream
-        .write_all(&(data.len() as u32).to_be_bytes())
-        .await?;
+    stream.write_all(&(data.len() as u32).to_be_bytes()).await?;
     stream.write_all(data).await?;
     stream.flush().await
 }
@@ -437,10 +435,7 @@ async fn read_frame(stream: &mut TcpStream) -> Option<Vec<u8>> {
 // ── Background tasks ──────────────────────────────────────────────────────────
 
 /// Accept inbound TCP connections and push each payload into the receive queue.
-async fn inbound_loop(
-    listener: TcpListener,
-    recv_tx: mpsc::UnboundedSender<IncomingMessage>,
-) {
+async fn inbound_loop(listener: TcpListener, recv_tx: mpsc::UnboundedSender<IncomingMessage>) {
     loop {
         match listener.accept().await {
             Ok((mut stream, _peer)) => {
@@ -463,10 +458,7 @@ async fn inbound_loop(
 }
 
 /// Drain the outbound send queue, opening a fresh SOCKS5 connection per message.
-async fn outbound_loop(
-    mut send_rx: mpsc::Receiver<(String, Vec<u8>)>,
-    socks_addr: String,
-) {
+async fn outbound_loop(mut send_rx: mpsc::Receiver<(String, Vec<u8>)>, socks_addr: String) {
     while let Some((addr, payload)) = send_rx.recv().await {
         let socks = socks_addr.clone();
         tokio::spawn(async move {
@@ -488,10 +480,7 @@ async fn outbound_loop(
 ///
 /// This ensures that an external observer always sees traffic flowing,
 /// making it harder to determine whether real messages are being exchanged.
-async fn cover_traffic_loop(
-    own_address: String,
-    send_tx: mpsc::Sender<(String, Vec<u8>)>,
-) {
+async fn cover_traffic_loop(own_address: String, send_tx: mpsc::Sender<(String, Vec<u8>)>) {
     loop {
         let interval_secs = sample_exponential(COVER_MEAN_SECS);
         tokio::time::sleep(Duration::from_secs_f64(interval_secs)).await;
@@ -504,9 +493,8 @@ async fn cover_traffic_loop(
 
 /// Standard (padded) Base64 encoding — what Tor's control port expects.
 fn base64_encode_standard(data: &[u8]) -> String {
-    const T: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = if chunk.len() > 1 { chunk[1] as u32 } else { 0 };
@@ -514,8 +502,16 @@ fn base64_encode_standard(data: &[u8]) -> String {
         let v = (b0 << 16) | (b1 << 8) | b2;
         out.push(T[((v >> 18) & 0x3f) as usize] as char);
         out.push(T[((v >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 { T[((v >> 6) & 0x3f) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[(v & 0x3f) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[((v >> 6) & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(v & 0x3f) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }

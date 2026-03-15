@@ -7,10 +7,7 @@ use std::io::{self, Read, Write};
 ///
 /// Used exclusively for passphrase input — no secrets accepted via CLI args.
 pub fn read_secret_from_tty(prompt: &str) -> io::Result<String> {
-    let mut tty = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("/dev/tty")?;
+    let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
 
     // Print prompt to tty
     write!(tty, "{prompt}")?;

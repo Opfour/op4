@@ -78,11 +78,7 @@ pub fn aead_encrypt(key: &SymKey, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8
 }
 
 /// Decrypt. Input must be `[12-byte nonce][ciphertext+tag]`.
-pub fn aead_decrypt(
-    key: &SymKey,
-    nonce_and_ct: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>, CryptoError> {
+pub fn aead_decrypt(key: &SymKey, nonce_and_ct: &[u8], aad: &[u8]) -> Result<Vec<u8>, CryptoError> {
     if nonce_and_ct.len() < AEAD_NONCE_LEN + 16 {
         return Err(CryptoError::AeadDecrypt);
     }
@@ -90,10 +86,7 @@ pub fn aead_decrypt(
     let nonce = ChaNonce::from_slice(nonce_bytes);
     let cipher = ChaCha20Poly1305::new(ChaKey::from_slice(&key.0));
     cipher
-        .decrypt(
-            nonce,
-            chacha20poly1305::aead::Payload { msg: ct, aad },
-        )
+        .decrypt(nonce, chacha20poly1305::aead::Payload { msg: ct, aad })
         .map_err(|_| CryptoError::AeadDecrypt)
 }
 
@@ -106,8 +99,13 @@ pub fn argon2id_derive(
     salt: &[u8],
     params: &Argon2Params,
 ) -> Result<SymKey, CryptoError> {
-    let argon2_params = Params::new(params.m_cost, params.t_cost, params.p_cost, Some(AEAD_KEY_LEN))
-        .map_err(|_| CryptoError::Argon2Params)?;
+    let argon2_params = Params::new(
+        params.m_cost,
+        params.t_cost,
+        params.p_cost,
+        Some(AEAD_KEY_LEN),
+    )
+    .map_err(|_| CryptoError::Argon2Params)?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
     let mut key = [0u8; AEAD_KEY_LEN];
     argon2

@@ -1,13 +1,31 @@
-use std::collections::HashMap;
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::ZeroizeOnDrop;
 
-use crate::crypto::primitives::{
-    aead_decrypt, aead_encrypt, hkdf_expand, hmac_sign_raw, SymKey,
-};
+use crate::crypto::primitives::{aead_decrypt, aead_encrypt, hkdf_expand, hmac_sign_raw, SymKey};
 use crate::error::CryptoError;
+
+// ─── Serializable Mirror ──────────────────────────────────────────────────────
+
+/// A serializable mirror of `RatchetState`.
+/// All secret key material is held as raw `[u8; 32]` arrays so postcard can
+/// encode it.  Callers are responsible for zeroizing these bytes after use.
+#[derive(Serialize, Deserialize)]
+pub struct SerializableRatchetState {
+    pub dhs: [u8; 32],
+    pub dhs_pub: [u8; 32],
+    pub dhr: Option<[u8; 32]>,
+    pub rk: [u8; 32],
+    pub cks: Option<[u8; 32]>,
+    pub ckr: Option<[u8; 32]>,
+    pub ns: u64,
+    pub nr: u64,
+    pub pn: u64,
+    /// Flattened form of the skipped-key HashMap.
+    pub mkskipped: Vec<(SkippedKeyIndex, [u8; 32])>,
+}
 
 const MAX_SKIP: u64 = 100;
 
@@ -23,7 +41,12 @@ pub struct MessageKey(pub [u8; 32]);
 /// Uses HKDF with domain separation to produce two independent keys.
 pub fn split_message_key(mk: &MessageKey) -> Result<(SymKey, [u8; 32]), CryptoError> {
     let mut out = [0u8; 64];
-    hkdf_expand(&mk.0, Some(&[0u8; 32]), b"op4-ratchet-mk-split-v1", &mut out)?;
+    hkdf_expand(
+        &mk.0,
+        Some(&[0u8; 32]),
+        b"op4-ratchet-mk-split-v1",
+        &mut out,
+    )?;
     let mut aead_key = [0u8; 32];
     let mut mac_key = [0u8; 32];
     aead_key.copy_from_slice(&out[..32]);
@@ -77,19 +100,19 @@ pub struct SkippedKeyIndex {
 /// Persisted (encrypted) after every send/receive operation.
 #[derive(ZeroizeOnDrop)]
 pub struct RatchetState {
-    dhs: StaticSecret,              // our current DH ratchet sending secret
+    dhs: StaticSecret, // our current DH ratchet sending secret
     dhs_pub: X25519PublicKey,
     #[zeroize(skip)]
-    dhr: Option<X25519PublicKey>,   // remote's current ratchet public key
+    dhr: Option<X25519PublicKey>, // remote's current ratchet public key
 
-    rk: [u8; 32],                   // root key
+    rk: [u8; 32], // root key
 
-    cks: Option<ChainKey>,          // sending chain key
-    ckr: Option<ChainKey>,          // receiving chain key
+    cks: Option<ChainKey>, // sending chain key
+    ckr: Option<ChainKey>, // receiving chain key
 
-    ns: u64,  // monotonic send counter
-    nr: u64,  // monotonic recv counter
-    pn: u64,  // previous sending chain length
+    ns: u64, // monotonic send counter
+    nr: u64, // monotonic recv counter
+    pn: u64, // previous sending chain length
 
     // Out-of-order message key buffer (bounded to MAX_SKIP)
     #[zeroize(skip)]
@@ -98,10 +121,7 @@ pub struct RatchetState {
 
 impl RatchetState {
     /// Initialize as the session initiator (Alice).
-    pub fn init_alice(
-        root_key: [u8; 32],
-        bob_ratchet_pub: X25519PublicKey,
-    ) -> Self {
+    pub fn init_alice(root_key: [u8; 32], bob_ratchet_pub: X25519PublicKey) -> Self {
         let dhs = StaticSecret::random_from_rng(OsRng);
         let dhs_pub = X25519PublicKey::from(&dhs);
         let dh_out = dhs.diffie_hellman(&bob_ratchet_pub);
@@ -139,6 +159,63 @@ impl RatchetState {
 
     pub fn our_ratchet_pub(&self) -> [u8; 32] {
         self.dhs_pub.to_bytes()
+    }
+
+    // ─── Persistence ──────────────────────────────────────────────────────────
+
+    /// Convert to a serializable mirror struct.
+    pub fn to_serializable(&self) -> SerializableRatchetState {
+        SerializableRatchetState {
+            dhs: self.dhs.to_bytes(),
+            dhs_pub: self.dhs_pub.to_bytes(),
+            dhr: self.dhr.as_ref().map(|k| k.to_bytes()),
+            rk: self.rk,
+            cks: self.cks.as_ref().map(|k| k.0),
+            ckr: self.ckr.as_ref().map(|k| k.0),
+            ns: self.ns,
+            nr: self.nr,
+            pn: self.pn,
+            mkskipped: self
+                .mkskipped
+                .iter()
+                .map(|(idx, mk)| (idx.clone(), mk.0))
+                .collect(),
+        }
+    }
+
+    /// Reconstruct from a serializable mirror struct.
+    pub fn from_serializable(s: SerializableRatchetState) -> Self {
+        Self {
+            dhs: StaticSecret::from(s.dhs),
+            dhs_pub: X25519PublicKey::from(s.dhs_pub),
+            dhr: s.dhr.map(X25519PublicKey::from),
+            rk: s.rk,
+            cks: s.cks.map(ChainKey),
+            ckr: s.ckr.map(ChainKey),
+            ns: s.ns,
+            nr: s.nr,
+            pn: s.pn,
+            mkskipped: s
+                .mkskipped
+                .into_iter()
+                .map(|(idx, mk)| (idx, MessageKey(mk)))
+                .collect(),
+        }
+    }
+
+    /// Serialize and AEAD-encrypt the ratchet state with a per-conversation key.
+    pub fn to_encrypted_bytes(&self, key: &SymKey) -> Result<Vec<u8>, CryptoError> {
+        let s = self.to_serializable();
+        let plain = postcard::to_allocvec(&s).map_err(|_| CryptoError::AeadEncrypt)?;
+        aead_encrypt(key, &plain, b"op4-ratchet-v1")
+    }
+
+    /// Decrypt and deserialize ratchet state from a per-conversation key.
+    pub fn from_encrypted_bytes(key: &SymKey, ct: &[u8]) -> Result<Self, CryptoError> {
+        let plain = aead_decrypt(key, ct, b"op4-ratchet-v1")?;
+        let s: SerializableRatchetState =
+            postcard::from_bytes(&plain).map_err(|_| CryptoError::AeadDecrypt)?;
+        Ok(Self::from_serializable(s))
     }
 
     /// Encrypt a plaintext. Returns (header, ciphertext_with_nonce).
@@ -212,11 +289,7 @@ impl RatchetState {
             let ck = self.ckr.as_ref().ok_or(CryptoError::NoChainKey)?;
             let (mk, next_ck) = kdf_ck(ck);
             let idx = SkippedKeyIndex {
-                dh_ratchet_pub: self
-                    .dhr
-                    .as_ref()
-                    .ok_or(CryptoError::NoDhrKey)?
-                    .to_bytes(),
+                dh_ratchet_pub: self.dhr.as_ref().ok_or(CryptoError::NoDhrKey)?.to_bytes(),
                 msg_num: self.nr,
             };
             self.mkskipped.insert(idx, mk);

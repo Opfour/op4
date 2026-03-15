@@ -6,7 +6,7 @@ const MIN_SCORE: u8 = 3; // zxcvbn score 0–4; require ≥ 3
 
 /// Passphrase strength result.
 pub struct StrengthResult {
-    pub score: u8,           // 0–4
+    pub score: u8, // 0–4
     pub feedback: Vec<String>,
     pub is_acceptable: bool,
 }
