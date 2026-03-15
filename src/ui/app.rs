@@ -14,8 +14,9 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use crate::crypto::handshake::{
     perform_handshake_alice, perform_handshake_bob, HandshakeInitMessage,
 };
-use crate::crypto::hmac_auth::MessageMac;
+use crate::crypto::hmac_auth::{compute_message_mac, verify_message_mac, MessageMac};
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
+use crate::crypto::primitives::MacKey;
 use crate::crypto::ratchet::{MessageHeader, RatchetState};
 use crate::identity::profile::{ContactCode, StoredContact};
 use crate::network::message::{WireMessage, WireMessageType};
@@ -46,6 +47,16 @@ enum ContactMode {
     AddContact,
     ExportCode,
     KeyAlert,
+    /// Reviewing an inbound contact request from an unknown party.
+    PendingRequest,
+}
+
+/// A completed handshake from an unknown contact awaiting user acceptance.
+/// Crypto work is already done; we just need the user to assign a name.
+struct PendingHandshake {
+    bundle: PublicKeyBundle,
+    plaintext: Vec<u8>,
+    session_key_bytes: [u8; 32],
 }
 
 struct AppState {
@@ -57,10 +68,15 @@ struct AppState {
     add_buf: String,
     export_code: String,
     key_alert: Option<(String, String)>, // (contact_name, new_fingerprint)
+    // Pending inbound contact requests
+    pending_handshakes: Vec<PendingHandshake>,
+    pending_name_buf: String,
     // Conversation
     draft: String,
     messages: Vec<StoredMessage>,
     active_contact_idx: Option<usize>,
+    /// Tracks which contact's messages are currently loaded in `messages`.
+    loaded_contact_idx: Option<usize>,
     // Settings
     settings_list: ListState,
     // Status bar
@@ -81,18 +97,26 @@ impl AppState {
             add_buf: String::new(),
             export_code,
             key_alert: None,
+            pending_handshakes: Vec::new(),
+            pending_name_buf: String::new(),
             draft: String::new(),
             messages: Vec::new(),
             active_contact_idx: None,
+            loaded_contact_idx: None,
             settings_list,
-            status: contacts_help(),
+            status: contacts_help(0),
         }
     }
 }
 
-fn contacts_help() -> String {
-    "Tab:switch  ↑↓:navigate  a:add-contact  e:export-code  v:verify  d:delete  Enter:view  q:quit"
-        .into()
+fn contacts_help(pending: usize) -> String {
+    if pending > 0 {
+        format!(
+            "Tab:switch  ↑↓:nav  a:add  e:export  v:verify  d:delete  p:pending({pending})  q:quit"
+        )
+    } else {
+        "Tab:switch  ↑↓:navigate  a:add-contact  e:export-code  v:verify  d:delete  Enter:view  q:quit".into()
+    }
 }
 
 // ─── Public Entry Points ──────────────────────────────────────────────────────
@@ -113,6 +137,23 @@ pub fn run<B: ratatui::backend::Backend>(
     let mut app = AppState::new(export_code);
 
     loop {
+        // Reload messages if the active contact changed.
+        let current_contact = app
+            .active_contact_idx
+            .or_else(|| app.contacts_list.selected());
+        if current_contact != app.loaded_contact_idx {
+            if let Some(idx) = current_contact {
+                if let Some(contact) = vault.payload.contacts.get(idx) {
+                    app.messages = vault.load_messages(&contact.id);
+                } else {
+                    app.messages.clear();
+                }
+            } else {
+                app.messages.clear();
+            }
+            app.loaded_contact_idx = current_contact;
+        }
+
         terminal
             .draw(|f| draw(f, &mut app, &vault))
             .map_err(|e| crate::error::AppError::Io(std::io::Error::other(e.to_string())))?;
@@ -225,8 +266,14 @@ fn draw(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked) {
 }
 
 fn draw_tabs(f: &mut Frame, app: &AppState, area: Rect) {
+    let pending = app.pending_handshakes.len();
+    let contacts_label = if pending > 0 {
+        format!("Contacts [1] ({pending})")
+    } else {
+        "Contacts [1]".into()
+    };
     let titles = vec![
-        Line::from(Span::raw("Contacts [1]")),
+        Line::from(Span::raw(contacts_label)),
         Line::from(Span::raw("Messages [2]")),
         Line::from(Span::raw("Settings [3]")),
     ];
@@ -256,14 +303,28 @@ fn draw_contacts(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked, area:
         draw_export_code_popup(f, app, area);
         return;
     }
+    if app.contact_mode == ContactMode::PendingRequest {
+        draw_pending_request_popup(f, app, area);
+        return;
+    }
 
     if vault.payload.contacts.is_empty() {
-        let help = Paragraph::new(
+        let pending = app.pending_handshakes.len();
+        let msg = if pending > 0 {
+            format!(
+                "No contacts yet.\n\n\
+                 [a]  Add a contact using their contact code\n\
+                 [e]  Show your contact code to share with others\n\
+                 [p]  Review {pending} pending contact request(s)"
+            )
+        } else {
             "No contacts yet.\n\n\
              [a]  Add a contact using their contact code\n\
-             [e]  Show your contact code to share with others",
-        )
-        .block(Block::default().borders(Borders::ALL).title("Contacts"));
+             [e]  Show your contact code to share with others"
+                .into()
+        };
+        let help =
+            Paragraph::new(msg).block(Block::default().borders(Borders::ALL).title("Contacts"));
         f.render_widget(help, area);
         return;
     }
@@ -321,6 +382,32 @@ fn draw_export_code_popup(f: &mut Frame, app: &AppState, area: Rect) {
         )
         .wrap(ratatui::widgets::Wrap { trim: false });
     f.render_widget(block, popup);
+}
+
+fn draw_pending_request_popup(f: &mut Frame, app: &AppState, area: Rect) {
+    let popup = centered_rect(70, 60, area);
+    f.render_widget(Clear, popup);
+
+    if let Some(pending) = app.pending_handshakes.first() {
+        let fp = pending.bundle.fingerprint();
+        let preview = sanitize_for_display(&String::from_utf8_lossy(&pending.plaintext));
+        let text = format!(
+            "An unknown contact wants to message you.\n\n\
+             Their fingerprint:\n{fp}\n\n\
+             Their first message:\n\"{preview}\"\n\n\
+             Verify this fingerprint out-of-band before accepting.\n\n\
+             Enter a name for this contact:\n{}",
+            app.pending_name_buf
+        );
+        let block = Paragraph::new(text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Incoming Contact Request  [Enter:accept  Esc:reject]"),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(block, popup);
+    }
 }
 
 fn draw_conversation(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked, area: Rect) {
@@ -408,6 +495,7 @@ fn handle_contacts_key(
     vault: &mut VaultUnlocked,
 ) {
     let n = vault.payload.contacts.len();
+    let pending_count = app.pending_handshakes.len();
 
     match app.contact_mode {
         ContactMode::List | ContactMode::Fingerprint => match key.code {
@@ -430,7 +518,7 @@ fn handle_contacts_key(
             }
             KeyCode::Esc => {
                 app.contact_mode = ContactMode::List;
-                app.status = contacts_help();
+                app.status = contacts_help(pending_count);
             }
             KeyCode::Char('a') => {
                 app.contact_mode = ContactMode::AddContact;
@@ -440,6 +528,15 @@ fn handle_contacts_key(
             KeyCode::Char('e') => {
                 app.contact_mode = ContactMode::ExportCode;
                 app.status = "Esc to close.".into();
+            }
+            KeyCode::Char('p') => {
+                if !app.pending_handshakes.is_empty() {
+                    app.contact_mode = ContactMode::PendingRequest;
+                    app.pending_name_buf.clear();
+                    app.status = "Type a name, then Enter to accept. Esc to reject.".into();
+                } else {
+                    app.status = "No pending contact requests.".into();
+                }
             }
             KeyCode::Char('v') => {
                 if let Some(idx) = app.contacts_list.selected() {
@@ -485,7 +582,7 @@ fn handle_contacts_key(
             KeyCode::Esc => {
                 app.contact_mode = ContactMode::List;
                 app.add_buf.clear();
-                app.status = contacts_help();
+                app.status = contacts_help(pending_count);
             }
             KeyCode::Enter => {
                 let code_str = app.add_buf.trim().to_owned();
@@ -522,11 +619,93 @@ fn handle_contacts_key(
         ContactMode::ExportCode | ContactMode::KeyAlert => match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
                 app.contact_mode = ContactMode::List;
-                app.status = contacts_help();
+                app.status = contacts_help(pending_count);
+            }
+            _ => {}
+        },
+
+        ContactMode::PendingRequest => match key.code {
+            KeyCode::Esc => {
+                // Reject: discard this pending request.
+                if !app.pending_handshakes.is_empty() {
+                    app.pending_handshakes.remove(0);
+                }
+                app.pending_name_buf.clear();
+                app.contact_mode = ContactMode::List;
+                app.status = contacts_help(app.pending_handshakes.len());
+            }
+            KeyCode::Enter => {
+                accept_pending_handshake(app, vault);
+            }
+            KeyCode::Backspace => {
+                app.pending_name_buf.pop();
+            }
+            KeyCode::Char(c) => {
+                app.pending_name_buf.push(c);
             }
             _ => {}
         },
     }
+}
+
+/// Accept the first pending handshake: add the contact, init the ratchet,
+/// persist the initial message, and dismiss the popup.
+fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked) {
+    if app.pending_handshakes.is_empty() {
+        app.contact_mode = ContactMode::List;
+        return;
+    }
+
+    let name = app.pending_name_buf.trim().to_owned();
+    if name.is_empty() {
+        app.status = "Please enter a name for this contact first.".into();
+        return;
+    }
+
+    let pending = app.pending_handshakes.remove(0);
+    app.pending_name_buf.clear();
+
+    // Add the contact.
+    let seq = vault.payload.sequence;
+    vault.payload.sequence += 1;
+    let contact = StoredContact::new(pending.bundle, name.clone(), seq);
+    let contact_id = contact.id;
+    vault.payload.contacts.push(contact);
+    let new_idx = vault.payload.contacts.len() - 1;
+    app.contacts_list.select(Some(new_idx));
+
+    // Reconstruct our KEM keypair and initialise Bob's ratchet.
+    if let Ok(our_kem) = HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+        let bob_ratchet_secret = StaticSecret::from(our_kem.x25519_secret.to_bytes());
+        let ratchet = RatchetState::init_bob(pending.session_key_bytes, bob_ratchet_secret);
+        let conv_key = vault.derive_conversation_key(&contact_id);
+        if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
+            let conv = vault.get_or_create_conversation(contact_id);
+            conv.ratchet_state_ct = ratchet_ct;
+        }
+    }
+
+    // Persist the initial message.
+    let text = sanitize_for_display(&String::from_utf8_lossy(&pending.plaintext));
+    let initial_msg = StoredMessage {
+        counter: 1,
+        content: text.clone(),
+        from_us: false,
+    };
+    vault.save_messages(&contact_id, &[initial_msg]).ok();
+
+    vault.save().ok();
+    app.contact_mode = ContactMode::List;
+    app.status = format!(
+        "Contact '{}' added. Switch to Messages to reply.",
+        sanitize_for_display(&name)
+    );
+    app.status = format!(
+        "{} | {} pending request(s) remain",
+        app.status,
+        app.pending_handshakes.len()
+    );
+    app.status = contacts_help(app.pending_handshakes.len());
 }
 
 fn handle_conversation_key(
@@ -539,7 +718,7 @@ fn handle_conversation_key(
         KeyCode::Esc => {
             if app.draft.is_empty() {
                 app.tab = Tab::Contacts;
-                app.status = contacts_help();
+                app.status = contacts_help(app.pending_handshakes.len());
             } else {
                 app.draft.clear();
             }
@@ -596,7 +775,7 @@ fn handle_settings_key(
         },
         KeyCode::Char('1') => {
             app.tab = Tab::Contacts;
-            app.status = contacts_help();
+            app.status = contacts_help(app.pending_handshakes.len());
         }
         KeyCode::Char('2') => {
             app.tab = Tab::Conversation;
@@ -614,7 +793,8 @@ fn handle_settings_key(
 ///
 /// On the first message to a contact, performs the X3DH handshake to
 /// establish a shared session key and initialises the Double Ratchet.
-/// Subsequent messages use the ratchet directly.
+/// Subsequent messages use the ratchet directly, with a full HMAC-SHA256
+/// deniable authentication tag attached to the wire message.
 fn send_message(
     app: &mut AppState,
     vault: &mut VaultUnlocked,
@@ -678,18 +858,22 @@ fn send_message(
                 return;
             }
         };
-        let (header, ct) = match ratchet.ratchet_encrypt(plaintext) {
+        let (header, ct, mac_key_bytes) = match ratchet.ratchet_encrypt(plaintext) {
             Ok(r) => r,
             Err(_) => {
                 app.status = "Encryption failed.".into();
                 return;
             }
         };
+
+        // Compute deniable HMAC-SHA256 over (conv_id || counter || ciphertext).
+        let mac = compute_message_mac(&MacKey(mac_key_bytes), &contact_id, header.n, &ct);
+
         let wire = WireMessage {
             msg_type: WireMessageType::Data,
             header,
             ciphertext: ct,
-            mac: MessageMac { tag: [0u8; 32] },
+            mac,
         }
         .with_padding();
         wire_payload = wire.to_bytes();
@@ -752,13 +936,17 @@ fn send_message(
     // Transmit.
     match nym.send(&contact_addr, wire_payload) {
         Ok(()) => {
-            let counter = app.messages.len() as u64 + 1;
             let text = sanitize_for_display(&String::from_utf8_lossy(plaintext));
-            app.messages.push(StoredMessage {
+            // Persist to vault message log.
+            let mut msgs = vault.load_messages(&contact_id);
+            let counter = msgs.len() as u64 + 1;
+            msgs.push(StoredMessage {
                 counter,
                 content: text,
                 from_us: true,
             });
+            vault.save_messages(&contact_id, &msgs).ok();
+            app.messages = msgs;
             app.status = "Message sent.".into();
             vault.save().ok();
         }
@@ -786,7 +974,7 @@ fn handle_incoming_message(app: &mut AppState, vault: &mut VaultUnlocked, payloa
         }
 
         WireMessageType::Data => {
-            handle_inbound_data(app, vault, &wire.header, &wire.ciphertext);
+            handle_inbound_data(app, vault, &wire.header, &wire.ciphertext, &wire.mac);
         }
 
         // Ack / Revocation — not yet implemented; silently drop.
@@ -794,27 +982,16 @@ fn handle_incoming_message(app: &mut AppState, vault: &mut VaultUnlocked, payloa
     }
 }
 
-/// Process an inbound handshake from a known contact (acts as Bob).
+/// Process an inbound handshake. If the sender is a known contact, complete
+/// the session setup immediately. If unknown, store as a pending request for
+/// the user to review.
 fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_bytes: &[u8]) {
     let hs_msg: HandshakeInitMessage = match postcard::from_bytes(hs_bytes) {
         Ok(m) => m,
         Err(_) => return,
     };
 
-    // Identify the sender by their Ed25519 verifying key.
-    let alice_ed_vk = hs_msg.alice_identity.ed25519_vk;
-    let contact_idx = match vault
-        .payload
-        .contacts
-        .iter()
-        .position(|c| c.bundle.ed25519_vk == alice_ed_vk)
-    {
-        Some(i) => i,
-        None => return, // unknown contact — silently drop
-    };
-    let contact_id = vault.payload.contacts[contact_idx].id;
-
-    // Reconstruct our KEM keypair.
+    // Reconstruct our KEM keypair (needed for both paths).
     let our_kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
         Ok(k) => k,
         Err(_) => return,
@@ -826,35 +1003,72 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
         Err(_) => return, // MAC or decryption failure
     };
 
-    // Initialise Bob's ratchet using our identity X25519 secret.
-    let bob_ratchet_secret = StaticSecret::from(our_kem.x25519_secret.to_bytes());
-    let ratchet = RatchetState::init_bob(session_key.0, bob_ratchet_secret);
+    // Identify the sender by their Ed25519 verifying key.
+    let alice_ed_vk = hs_msg.alice_identity.ed25519_vk;
+    let contact_idx = vault
+        .payload
+        .contacts
+        .iter()
+        .position(|c| c.bundle.ed25519_vk == alice_ed_vk);
 
-    // Persist ratchet state.
-    let conv_key = vault.derive_conversation_key(&contact_id);
-    if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
-        let conv = vault.get_or_create_conversation(contact_id);
-        conv.ratchet_state_ct = ratchet_ct;
+    match contact_idx {
+        Some(idx) => {
+            // Known contact — set up ratchet and display message immediately.
+            let contact_id = vault.payload.contacts[idx].id;
+            let bob_ratchet_secret = StaticSecret::from(our_kem.x25519_secret.to_bytes());
+            let ratchet = RatchetState::init_bob(session_key.0, bob_ratchet_secret);
+            let conv_key = vault.derive_conversation_key(&contact_id);
+            if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
+                let conv = vault.get_or_create_conversation(contact_id);
+                conv.ratchet_state_ct = ratchet_ct;
+            }
+
+            let text = sanitize_for_display(&String::from_utf8_lossy(&plaintext));
+            let mut msgs = vault.load_messages(&contact_id);
+            let counter = msgs.len() as u64 + 1;
+            msgs.push(StoredMessage {
+                counter,
+                content: text,
+                from_us: false,
+            });
+            vault.save_messages(&contact_id, &msgs).ok();
+
+            // Update in-memory display if this is the active conversation.
+            let active_id = app
+                .active_contact_idx
+                .or_else(|| app.contacts_list.selected())
+                .and_then(|i| vault.payload.contacts.get(i))
+                .map(|c| c.id);
+            if active_id == Some(contact_id) {
+                app.messages = msgs;
+            } else if let Some(conv_idx) = vault.find_conversation_by_contact(&contact_id) {
+                vault.payload.conversations[conv_idx].unread_count += 1;
+            }
+            vault.save().ok();
+        }
+        None => {
+            // Unknown contact — queue as a pending request for the user to review.
+            app.pending_handshakes.push(PendingHandshake {
+                bundle: hs_msg.alice_identity,
+                plaintext,
+                session_key_bytes: session_key.0,
+            });
+            let n = app.pending_handshakes.len();
+            app.status =
+                format!("{n} pending contact request(s) — press [p] in Contacts to review");
+        }
     }
-
-    // Display the received message.
-    let text = sanitize_for_display(&String::from_utf8_lossy(&plaintext));
-    let counter = app.messages.len() as u64 + 1;
-    app.messages.push(StoredMessage {
-        counter,
-        content: text,
-        from_us: false,
-    });
-    vault.save().ok();
 }
 
 /// Try to decrypt an inbound data message against every known ratchet state
 /// (sealed-sender: the wire frame carries no sender identity).
+/// Verifies the deniable HMAC tag; rejects messages with a bad MAC.
 fn handle_inbound_data(
     app: &mut AppState,
     vault: &mut VaultUnlocked,
     header: &MessageHeader,
     ciphertext: &[u8],
+    mac: &MessageMac,
 ) {
     let n_contacts = vault.payload.contacts.len();
     for i in 0..n_contacts {
@@ -874,22 +1088,52 @@ fn handle_inbound_data(
             Ok(r) => r,
             Err(_) => continue,
         };
-        let plaintext = match ratchet.ratchet_decrypt(header, ciphertext) {
-            Ok(p) => p,
+        let (plaintext, mac_key_bytes) = match ratchet.ratchet_decrypt(header, ciphertext) {
+            Ok(r) => r,
             Err(_) => continue,
         };
 
-        // Decryption succeeded — persist updated ratchet and display message.
+        // Verify deniable MAC unless the sender used zero-fill (pre-MAC peer).
+        if mac.tag != [0u8; 32]
+            && !verify_message_mac(
+                &MacKey(mac_key_bytes),
+                &contact_id,
+                header.n,
+                ciphertext,
+                mac,
+            )
+        {
+            app.status = "Message rejected: HMAC authentication failed.".into();
+            return;
+        }
+
+        // Persist updated ratchet state.
         if let Ok(new_ct) = ratchet.to_encrypted_bytes(&conv_key) {
             vault.payload.conversations[conv_idx].ratchet_state_ct = new_ct;
         }
+
+        // Persist the message.
         let text = sanitize_for_display(&String::from_utf8_lossy(&plaintext));
-        let counter = app.messages.len() as u64 + 1;
-        app.messages.push(StoredMessage {
+        let mut msgs = vault.load_messages(&contact_id);
+        let counter = msgs.len() as u64 + 1;
+        msgs.push(StoredMessage {
             counter,
             content: text,
             from_us: false,
         });
+        vault.save_messages(&contact_id, &msgs).ok();
+
+        // Update in-memory display if this is the active conversation.
+        let active_id = app
+            .active_contact_idx
+            .or_else(|| app.contacts_list.selected())
+            .and_then(|idx| vault.payload.contacts.get(idx))
+            .map(|c| c.id);
+        if active_id == Some(contact_id) {
+            app.messages = msgs;
+        } else {
+            vault.payload.conversations[conv_idx].unread_count += 1;
+        }
         vault.save().ok();
         return;
     }

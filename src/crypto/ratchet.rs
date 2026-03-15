@@ -218,12 +218,13 @@ impl RatchetState {
         Ok(Self::from_serializable(s))
     }
 
-    /// Encrypt a plaintext. Returns (header, ciphertext_with_nonce).
-    /// The header is used as AEAD additional data.
+    /// Encrypt a plaintext. Returns (header, ciphertext_with_nonce, mac_key_bytes).
+    /// The mac_key is the HMAC key derived from the message key — callers use it
+    /// to compute a deniable `MessageMac` over the ciphertext.
     pub fn ratchet_encrypt(
         &mut self,
         plaintext: &[u8],
-    ) -> Result<(MessageHeader, Vec<u8>), CryptoError> {
+    ) -> Result<(MessageHeader, Vec<u8>, [u8; 32]), CryptoError> {
         let (mk, new_cks) = kdf_ck(self.cks.as_ref().ok_or(CryptoError::NoChainKey)?);
         self.cks = Some(new_cks);
 
@@ -235,18 +236,20 @@ impl RatchetState {
         // Monotonically increment — never set from remote data
         self.ns += 1;
 
-        let (aead_key, _mac_key) = split_message_key(&mk)?;
+        let (aead_key, mac_key_bytes) = split_message_key(&mk)?;
         let aad = postcard::to_allocvec(&header).map_err(|_| CryptoError::AeadEncrypt)?;
         let ct = aead_encrypt(&aead_key, plaintext, &aad)?;
-        Ok((header, ct))
+        Ok((header, ct, mac_key_bytes))
     }
 
-    /// Decrypt a message. Handles DH ratchet advancement and skipped keys.
+    /// Decrypt a message. Returns (plaintext, mac_key_bytes).
+    /// The mac_key lets callers verify the deniable `MessageMac` that accompanied
+    /// the ciphertext. Handles DH ratchet advancement and skipped keys.
     pub fn ratchet_decrypt(
         &mut self,
         header: &MessageHeader,
         ciphertext: &[u8],
-    ) -> Result<Vec<u8>, CryptoError> {
+    ) -> Result<(Vec<u8>, [u8; 32]), CryptoError> {
         let aad = postcard::to_allocvec(header).map_err(|_| CryptoError::AeadDecrypt)?;
 
         // 1. Check the skipped-message-key buffer first
@@ -255,8 +258,9 @@ impl RatchetState {
             msg_num: header.n,
         };
         if let Some(mk) = self.mkskipped.remove(&skip_idx) {
-            let (aead_key, _) = split_message_key(&mk)?;
-            return aead_decrypt(&aead_key, ciphertext, &aad);
+            let (aead_key, mac_key_bytes) = split_message_key(&mk)?;
+            let pt = aead_decrypt(&aead_key, ciphertext, &aad)?;
+            return Ok((pt, mac_key_bytes));
         }
 
         // 2. New DH ratchet key from peer? Advance.
@@ -276,8 +280,9 @@ impl RatchetState {
         // Monotonically increment — never set from header.n directly
         self.nr += 1;
 
-        let (aead_key, _) = split_message_key(&mk)?;
-        aead_decrypt(&aead_key, ciphertext, &aad)
+        let (aead_key, mac_key_bytes) = split_message_key(&mk)?;
+        let pt = aead_decrypt(&aead_key, ciphertext, &aad)?;
+        Ok((pt, mac_key_bytes))
     }
 
     /// Buffer skipped message keys up to `until`, bounded by MAX_SKIP.
@@ -345,8 +350,8 @@ mod tests {
     fn basic_roundtrip() {
         let (mut alice, mut bob) = make_pair();
         let msg = b"hello from alice";
-        let (hdr, ct) = alice.ratchet_encrypt(msg).unwrap();
-        let pt = bob.ratchet_decrypt(&hdr, &ct).unwrap();
+        let (hdr, ct, _mac_key) = alice.ratchet_encrypt(msg).unwrap();
+        let (pt, _mac_key) = bob.ratchet_decrypt(&hdr, &ct).unwrap();
         assert_eq!(pt, msg);
     }
 
@@ -355,8 +360,8 @@ mod tests {
         let (mut alice, mut bob) = make_pair();
         for i in 0u8..10 {
             let msg = vec![i; 16];
-            let (hdr, ct) = alice.ratchet_encrypt(&msg).unwrap();
-            let pt = bob.ratchet_decrypt(&hdr, &ct).unwrap();
+            let (hdr, ct, _) = alice.ratchet_encrypt(&msg).unwrap();
+            let (pt, _) = bob.ratchet_decrypt(&hdr, &ct).unwrap();
             assert_eq!(pt, msg);
         }
     }
@@ -364,8 +369,8 @@ mod tests {
     #[test]
     fn counters_are_monotonic() {
         let (mut alice, _) = make_pair();
-        let (hdr1, _) = alice.ratchet_encrypt(b"a").unwrap();
-        let (hdr2, _) = alice.ratchet_encrypt(b"b").unwrap();
+        let (hdr1, _, _) = alice.ratchet_encrypt(b"a").unwrap();
+        let (hdr2, _, _) = alice.ratchet_encrypt(b"b").unwrap();
         assert!(hdr2.n > hdr1.n);
     }
 }

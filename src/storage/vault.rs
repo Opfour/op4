@@ -204,6 +204,40 @@ impl VaultUnlocked {
         &mut self.payload.conversations[idx]
     }
 
+    /// Decrypt and return the persisted message log for `contact_id`.
+    /// Returns an empty Vec if no messages have been saved yet.
+    pub fn load_messages(&self, contact_id: &[u8; 32]) -> Vec<StoredMessage> {
+        let conv_idx = match self.find_conversation_by_contact(contact_id) {
+            Some(i) => i,
+            None => return Vec::new(),
+        };
+        let ct = &self.payload.conversations[conv_idx].message_log_ct;
+        if ct.is_empty() {
+            return Vec::new();
+        }
+        let key = self.derive_conversation_key(contact_id);
+        let plain = match aead_decrypt(&key, ct, b"op4-msglog-v1") {
+            Ok(p) => p,
+            Err(_) => return Vec::new(),
+        };
+        postcard::from_bytes(&plain).unwrap_or_default()
+    }
+
+    /// Encrypt and persist the message log for `contact_id` into the vault.
+    /// Call `vault.save()` afterwards to flush to disk.
+    pub fn save_messages(
+        &mut self,
+        contact_id: &[u8; 32],
+        messages: &[StoredMessage],
+    ) -> Result<(), VaultError> {
+        let key = self.derive_conversation_key(contact_id);
+        let plain = postcard::to_allocvec(messages).map_err(|_| VaultError::Corrupt)?;
+        let ct = aead_encrypt(&key, &plain, b"op4-msglog-v1")?;
+        let conv = self.get_or_create_conversation(*contact_id);
+        conv.message_log_ct = ct;
+        Ok(())
+    }
+
     /// Save the vault atomically (tmp file + rename).
     pub fn save(&self) -> Result<(), VaultError> {
         // For the other section, we can't re-derive the duress key without the passphrase.
