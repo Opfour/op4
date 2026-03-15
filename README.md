@@ -229,11 +229,20 @@ All layers are now wired end-to-end:
   loop and displayed in the conversation view (sealed-sender pattern:
   the routing layer never reveals who sent the message).
 
-Known limitations in this release:
+All known limitations from the previous release have been resolved:
 
-- Message MAC (`MessageMac`) is a zero-filled placeholder — HMAC
-  deniable authentication is not yet connected to outbound messages.
-- Message history is in-memory only and is not yet persisted to the
-  vault's `message_log_ct` field across restarts.
-- An inbound handshake from a contact not already in your contacts list
-  is silently dropped (no "add from incoming handshake" flow yet).
+- **HMAC deniable authentication** is now fully wired. Every outbound data
+  message carries an HMAC-SHA256 tag computed from the per-message ratchet
+  key over `(conversation_id || message_counter || ciphertext)`. Inbound
+  messages are verified before being accepted; zero-filled tags from older
+  peers are tolerated for backward compatibility.
+- **Message history persists across restarts.** The full conversation log
+  is encrypted with a per-conversation HKDF-derived key and stored in the
+  vault's `message_log_ct` field. Messages are loaded from the vault when
+  a conversation is opened and written back after each send or receive.
+- **Inbound contact requests** from unknown parties are now queued rather
+  than dropped. The Contacts tab shows a badge when requests are waiting.
+  Press `[p]` to review: you see the sender's fingerprint and their first
+  message, type a name, and press Enter to accept (or Esc to reject). On
+  acceptance the contact is added, the Double Ratchet is initialised, and
+  the initial message is saved to the vault.
