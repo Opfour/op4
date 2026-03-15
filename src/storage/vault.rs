@@ -310,10 +310,16 @@ fn parse_header(data: &[u8]) -> Result<VaultHeader, VaultError> {
     duress_salt.copy_from_slice(&data[5 + SALT_LEN..5 + SALT_LEN * 2]);
 
     let len_off = 5 + SALT_LEN * 2;
-    let normal_ct_len =
-        u32::from_le_bytes(data[len_off..len_off + 4].try_into().unwrap()) as usize;
-    let duress_ct_len =
-        u32::from_le_bytes(data[len_off + 4..len_off + 8].try_into().unwrap()) as usize;
+    let normal_ct_len = u32::from_le_bytes(
+        data[len_off..len_off + 4]
+            .try_into()
+            .map_err(|_| VaultError::Corrupt)?,
+    ) as usize;
+    let duress_ct_len = u32::from_le_bytes(
+        data[len_off + 4..len_off + 8]
+            .try_into()
+            .map_err(|_| VaultError::Corrupt)?,
+    ) as usize;
 
     let remaining = data.len() - header_len;
     let section_padded_len = remaining / 2;

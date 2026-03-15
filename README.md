@@ -229,9 +229,10 @@ All layers are now wired end-to-end:
   loop and displayed in the conversation view (sealed-sender pattern:
   the routing layer never reveals who sent the message).
 
-All known limitations from the previous release have been resolved:
+All known limitations have been resolved. The application is now at
+feature-complete status for 0.1.0-dev:
 
-- **HMAC deniable authentication** is now fully wired. Every outbound data
+- **HMAC deniable authentication** is fully wired. Every outbound data
   message carries an HMAC-SHA256 tag computed from the per-message ratchet
   key over `(conversation_id || message_counter || ciphertext)`. Inbound
   messages are verified before being accepted; zero-filled tags from older
@@ -240,9 +241,25 @@ All known limitations from the previous release have been resolved:
   is encrypted with a per-conversation HKDF-derived key and stored in the
   vault's `message_log_ct` field. Messages are loaded from the vault when
   a conversation is opened and written back after each send or receive.
-- **Inbound contact requests** from unknown parties are now queued rather
-  than dropped. The Contacts tab shows a badge when requests are waiting.
+- **Inbound contact requests** from unknown parties are queued rather than
+  dropped. The Contacts tab shows a badge when requests are waiting.
   Press `[p]` to review: you see the sender's fingerprint and their first
   message, type a name, and press Enter to accept (or Esc to reject). On
   acceptance the contact is added, the Double Ratchet is initialised, and
   the initial message is saved to the vault.
+- **Duress vault preserved across saves.** The vault file format (v2) stores
+  exact ciphertext lengths in the header so AEAD decryption operates on the
+  real bytes rather than zero-padded sections. The encrypted duress section
+  is stored verbatim on every `save()` call, keeping the duress passphrase
+  valid indefinitely.
+- **Dedicated Double Ratchet bootstrap key.** A separate X25519 keypair
+  (`identity_ratchet_secret`) is generated on first run and included in the
+  contact code as `ratchet_pub`. Alice's ratchet is initialised with Bob's
+  `ratchet_pub` rather than his KEM identity key, separating key roles.
+- **Settings tab fully functional.** Tor SOCKS5 address and auto-delete
+  threshold can be edited inline. Key rotation (generates new keypair,
+  broadcasts a signed revocation certificate to all contacts, refreshes the
+  export code) and key retirement revocation are both wired and operational.
+- **Key revocation wired end-to-end.** `RevocationCertificate` structs are
+  signed with the hybrid Ed25519+ML-DSA-65 keypair and sent to all contacts
+  as `WireMessageType::Revocation` messages over Tor.
