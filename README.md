@@ -216,14 +216,24 @@ tested:
 - Terminal UI (navigation, contacts management, conversation view)
 - OS hardening (memory, seccomp, AppArmor)
 
-The following items are still being wired together and are not yet
-functional end-to-end:
+All layers are now wired end-to-end:
 
-- Identity keypair generation on first run
-- Exporting a real contact code (currently a placeholder)
-- Transmitting messages over Tor (UI composes messages; network send
-  is not yet connected to the UI)
-- Receiving and displaying inbound messages in the UI
+- Identity keypairs (X25519+ML-KEM-768, Ed25519+ML-DSA-65) are generated
+  on first run and stored encrypted in the vault.
+- Contact code export produces a real Base58-encoded `PublicKeyBundle`
+  (your full public key set + onion address).
+- Sending a message performs a full X3DH-style handshake on the first
+  message to a contact, then Double Ratchet encryption on subsequent
+  messages, transmitted over Tor.
+- Inbound messages are polled from the Tor transport in the TUI event
+  loop and displayed in the conversation view (sealed-sender pattern:
+  the routing layer never reveals who sent the message).
 
-These are the next items on the roadmap. The cryptographic and transport
-foundations are complete and correct.
+Known limitations in this release:
+
+- Message MAC (`MessageMac`) is a zero-filled placeholder — HMAC
+  deniable authentication is not yet connected to outbound messages.
+- Message history is in-memory only and is not yet persisted to the
+  vault's `message_log_ct` field across restarts.
+- An inbound handshake from a contact not already in your contacts list
+  is silently dropped (no "add from incoming handshake" flow yet).
