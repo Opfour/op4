@@ -50,6 +50,7 @@ pub struct HandshakeOutput {
 pub fn perform_handshake_alice(
     alice_kem: &HybridKemKeypair,
     alice_signing: &HybridSigningKeypair,
+    alice_ratchet_pub: [u8; 32],
     alice_nym_address: String,
     bob_bundle: &PublicKeyBundle,
     initial_plaintext: &[u8],
@@ -89,7 +90,7 @@ pub fn perform_handshake_alice(
     let mac = crate::crypto::primitives::hmac_sign_raw(&session_key.0, &mac_input);
 
     let alice_identity =
-        PublicKeyBundle::from_keypairs(alice_kem, alice_signing, alice_nym_address);
+        PublicKeyBundle::from_keypairs(alice_kem, alice_signing, alice_ratchet_pub, alice_nym_address);
 
     Ok((
         HandshakeInitMessage {

@@ -12,7 +12,11 @@ use crate::error::VaultError;
 use crate::identity::profile::StoredContact;
 
 const VAULT_MAGIC: &[u8; 4] = b"OP4V";
-const VAULT_VERSION: u8 = 1;
+/// Version 2 adds 8-byte section-length prefix fields to the header so that
+/// AEAD decryption operates on the exact ciphertext bytes rather than the
+/// padded section.  This fixes duress-passphrase decryption after the first
+/// save when the duress payload is smaller than the normal payload.
+const VAULT_VERSION: u8 = 2;
 const SALT_LEN: usize = 32;
 
 /// Stored conversation metadata in the vault.
@@ -63,6 +67,10 @@ pub struct VaultPayload {
     pub identity_kem_secret: Vec<u8>,
     /// Our identity signing keypair bytes
     pub identity_signing_secret: Vec<u8>,
+    /// Dedicated X25519 ratchet secret (separate from the KEM identity key).
+    /// Alice uses the corresponding public key from the contact's `PublicKeyBundle`
+    /// as Bob's initial ratchet key; Bob uses this secret for `init_bob()`.
+    pub identity_ratchet_secret: Vec<u8>,
     pub contacts: Vec<StoredContact>,
     pub conversations: Vec<ConversationMeta>,
     pub settings: AppSettings,
@@ -78,6 +86,9 @@ pub struct VaultUnlocked {
     master_key: SymKey,
     duress_salt: [u8; SALT_LEN],
     normal_salt: [u8; SALT_LEN],
+    /// Raw encrypted duress section ciphertext (without padding).
+    /// Preserved across saves so the duress passphrase keeps working.
+    duress_ct: Vec<u8>,
 }
 
 impl VaultUnlocked {
@@ -102,6 +113,11 @@ impl VaultUnlocked {
             ..Default::default()
         };
 
+        // Encrypt the duress section once and keep the raw ciphertext for future saves.
+        let duress_payload_bytes =
+            postcard::to_allocvec(&duress_payload).map_err(|_| VaultError::Corrupt)?;
+        let duress_ct = aead_encrypt(&duress_key, &duress_payload_bytes, VAULT_MAGIC)?;
+
         let vault = VaultUnlocked {
             payload,
             is_duress: false,
@@ -109,16 +125,15 @@ impl VaultUnlocked {
             master_key: normal_key,
             duress_salt,
             normal_salt,
+            duress_ct: duress_ct.clone(),
         };
 
-        // Build and write the vault file
         let vault_bytes = build_vault_file(
             &normal_salt,
             &duress_salt,
             &vault.master_key,
             &vault.payload,
-            &duress_key,
-            &duress_payload,
+            duress_ct,
         )?;
         write_atomic(path, &vault_bytes)?;
 
@@ -138,7 +153,15 @@ impl VaultUnlocked {
         let normal_result = try_decrypt_section(&data, &normal_key, &header, false);
         let duress_result = try_decrypt_section(&data, &duress_key, &header, true);
 
-        // Evaluate results after both attempts (constant-time)
+        // Extract both raw (pre-padding) ciphertext sections.
+        let normal_raw = data[header.normal_section_offset
+            ..header.normal_section_offset + header.normal_ct_len]
+            .to_vec();
+        let duress_raw = data[header.duress_section_offset
+            ..header.duress_section_offset + header.duress_ct_len]
+            .to_vec();
+
+        // Evaluate results after both attempts (constant-time).
         if let Ok(payload) = normal_result {
             Ok(VaultUnlocked {
                 payload,
@@ -147,6 +170,7 @@ impl VaultUnlocked {
                 master_key: normal_key,
                 duress_salt: header.duress_salt,
                 normal_salt: header.normal_salt,
+                duress_ct: duress_raw,
             })
         } else if let Ok(payload) = duress_result {
             Ok(VaultUnlocked {
@@ -156,6 +180,8 @@ impl VaultUnlocked {
                 master_key: duress_key,
                 duress_salt: header.duress_salt,
                 normal_salt: header.normal_salt,
+                // In duress mode we store the normal section so it stays intact.
+                duress_ct: normal_raw,
             })
         } else {
             Err(VaultError::InvalidPassphrase)
@@ -239,29 +265,15 @@ impl VaultUnlocked {
     }
 
     /// Save the vault atomically (tmp file + rename).
+    /// The duress section is preserved unchanged so the duress passphrase
+    /// continues to work across saves.
     pub fn save(&self) -> Result<(), VaultError> {
-        // For the other section, we can't re-derive the duress key without the passphrase.
-        // In a real implementation we'd keep the duress section opaque and just re-encrypt
-        // the normal section. For now, we write a placeholder duress section.
-        let duress_payload = VaultPayload {
-            nym_address: "[duress]".into(),
-            ..Default::default()
-        };
-        // We need the duress key to re-encrypt the duress section.
-        // Since we don't have it here, we generate a fresh random duress section
-        // that will be invalid (duress can only be set up at creation time).
-        // TODO: persist duress section separately in production.
-        let mut dummy_key_bytes = [0u8; 32];
-        OsRng.fill_bytes(&mut dummy_key_bytes);
-        let dummy_key = SymKey(dummy_key_bytes);
-
         let vault_bytes = build_vault_file(
             &self.normal_salt,
             &self.duress_salt,
             &self.master_key,
             &self.payload,
-            &dummy_key,
-            &duress_payload,
+            self.duress_ct.clone(),
         )?;
         write_atomic(&self.path, &vault_bytes)
     }
@@ -272,12 +284,18 @@ impl VaultUnlocked {
 struct VaultHeader {
     normal_salt: [u8; SALT_LEN],
     duress_salt: [u8; SALT_LEN],
+    /// Byte length of the actual (pre-padding) normal ciphertext.
+    normal_ct_len: usize,
+    /// Byte length of the actual (pre-padding) duress ciphertext.
+    duress_ct_len: usize,
     normal_section_offset: usize,
     duress_section_offset: usize,
 }
 
 fn parse_header(data: &[u8]) -> Result<VaultHeader, VaultError> {
-    if data.len() < 4 + 1 + SALT_LEN * 2 {
+    // magic(4) + version(1) + normal_salt(32) + duress_salt(32) + normal_len(4) + duress_len(4)
+    let header_len = 4 + 1 + SALT_LEN * 2 + 4 + 4;
+    if data.len() < header_len {
         return Err(VaultError::Corrupt);
     }
     if &data[..4] != VAULT_MAGIC {
@@ -290,15 +308,27 @@ fn parse_header(data: &[u8]) -> Result<VaultHeader, VaultError> {
     let mut duress_salt = [0u8; SALT_LEN];
     normal_salt.copy_from_slice(&data[5..5 + SALT_LEN]);
     duress_salt.copy_from_slice(&data[5 + SALT_LEN..5 + SALT_LEN * 2]);
-    let header_len = 5 + SALT_LEN * 2;
-    // Sections are split in half from header_len to end
+
+    let len_off = 5 + SALT_LEN * 2;
+    let normal_ct_len =
+        u32::from_le_bytes(data[len_off..len_off + 4].try_into().unwrap()) as usize;
+    let duress_ct_len =
+        u32::from_le_bytes(data[len_off + 4..len_off + 8].try_into().unwrap()) as usize;
+
     let remaining = data.len() - header_len;
-    let section_size = remaining / 2;
+    let section_padded_len = remaining / 2;
+
+    if normal_ct_len > section_padded_len || duress_ct_len > section_padded_len {
+        return Err(VaultError::Corrupt);
+    }
+
     Ok(VaultHeader {
         normal_salt,
         duress_salt,
+        normal_ct_len,
+        duress_ct_len,
         normal_section_offset: header_len,
-        duress_section_offset: header_len + section_size,
+        duress_section_offset: header_len + section_padded_len,
     })
 }
 
@@ -308,50 +338,66 @@ fn try_decrypt_section(
     header: &VaultHeader,
     is_duress: bool,
 ) -> Result<VaultPayload, VaultError> {
-    let (start, end) = if is_duress {
-        let s = header.duress_section_offset;
-        (s, data.len())
+    let (start, ct_len) = if is_duress {
+        (header.duress_section_offset, header.duress_ct_len)
     } else {
-        let s = header.normal_section_offset;
-        let e = header.duress_section_offset;
-        (s, e)
+        (header.normal_section_offset, header.normal_ct_len)
     };
-    if end <= start {
+    if ct_len == 0 || start + ct_len > data.len() {
         return Err(VaultError::Corrupt);
     }
-    let section = &data[start..end];
+    // Slice only the real ciphertext bytes — the padding that follows is ignored.
+    let section = &data[start..start + ct_len];
     let plaintext = aead_decrypt(key, section, VAULT_MAGIC)?;
     let payload: VaultPayload =
         postcard::from_bytes(&plaintext).map_err(|_| VaultError::Corrupt)?;
     Ok(payload)
 }
 
+/// Build a vault file with a freshly encrypted normal section and the
+/// preserved (opaque) duress ciphertext. Both sections are padded to the
+/// same length with random bytes so an observer cannot tell which is real.
 fn build_vault_file(
     normal_salt: &[u8; SALT_LEN],
     duress_salt: &[u8; SALT_LEN],
     normal_key: &SymKey,
     normal_payload: &VaultPayload,
-    duress_key: &SymKey,
-    duress_payload: &VaultPayload,
+    duress_ct: Vec<u8>,
 ) -> Result<Vec<u8>, VaultError> {
-    let normal_bytes = postcard::to_allocvec(normal_payload).map_err(|_| VaultError::Corrupt)?;
-    let duress_bytes = postcard::to_allocvec(duress_payload).map_err(|_| VaultError::Corrupt)?;
+    let normal_bytes =
+        postcard::to_allocvec(normal_payload).map_err(|_| VaultError::Corrupt)?;
+    let normal_ct = aead_encrypt(normal_key, &normal_bytes, VAULT_MAGIC)?;
 
-    let mut normal_ct = aead_encrypt(normal_key, &normal_bytes, VAULT_MAGIC)?;
-    let mut duress_ct = aead_encrypt(duress_key, &duress_bytes, VAULT_MAGIC)?;
+    let normal_ct_len = normal_ct.len();
+    let duress_ct_len = duress_ct.len();
 
-    // Pad both sections to the same size (hide which is real)
-    let max_len = normal_ct.len().max(duress_ct.len());
-    normal_ct.resize(max_len, 0);
-    duress_ct.resize(max_len, 0);
+    // Pad both sections to equal size with random bytes.
+    let max_len = normal_ct_len.max(duress_ct_len);
+    let mut normal_padded = normal_ct;
+    let mut duress_padded = duress_ct;
+    if normal_padded.len() < max_len {
+        let extra = max_len - normal_padded.len();
+        let mut pad = vec![0u8; extra];
+        OsRng.fill_bytes(&mut pad);
+        normal_padded.extend_from_slice(&pad);
+    }
+    if duress_padded.len() < max_len {
+        let extra = max_len - duress_padded.len();
+        let mut pad = vec![0u8; extra];
+        OsRng.fill_bytes(&mut pad);
+        duress_padded.extend_from_slice(&pad);
+    }
 
     let mut out = Vec::new();
     out.extend_from_slice(VAULT_MAGIC);
     out.push(VAULT_VERSION);
     out.extend_from_slice(normal_salt);
     out.extend_from_slice(duress_salt);
-    out.extend_from_slice(&normal_ct);
-    out.extend_from_slice(&duress_ct);
+    // Store pre-padding ciphertext lengths so decryption can slice exactly.
+    out.extend_from_slice(&(normal_ct_len as u32).to_le_bytes());
+    out.extend_from_slice(&(duress_ct_len as u32).to_le_bytes());
+    out.extend_from_slice(&normal_padded);
+    out.extend_from_slice(&duress_padded);
     Ok(out)
 }
 
