@@ -1,10 +1,10 @@
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
 use crate::crypto::keys::{
-    hybrid_kem_decapsulate, hybrid_kem_encapsulate,
-    HybridKemCiphertext, HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle,
+    hybrid_kem_decapsulate, hybrid_kem_encapsulate, HybridKemCiphertext, HybridKemKeypair,
+    HybridSigningKeypair, PublicKeyBundle,
 };
 use crate::crypto::primitives::{aead_decrypt, aead_encrypt, hkdf_expand, SymKey, AEAD_KEY_LEN};
 use crate::error::CryptoError;
@@ -50,6 +50,7 @@ pub struct HandshakeOutput {
 pub fn perform_handshake_alice(
     alice_kem: &HybridKemKeypair,
     alice_signing: &HybridSigningKeypair,
+    alice_nym_address: String,
     bob_bundle: &PublicKeyBundle,
     initial_plaintext: &[u8],
 ) -> Result<(HandshakeInitMessage, SymKey), CryptoError> {
@@ -73,25 +74,22 @@ pub fn perform_handshake_alice(
     let session_key = combine_dh_outputs(dh1.as_bytes(), dh2.as_bytes(), dh3.as_bytes(), &dh4_ss)?;
 
     // Encrypt initial payload with session key
-    let alice_identity_bytes =
-        postcard::to_allocvec(&alice_kem.x25519_public.to_bytes()).map_err(|_| CryptoError::AeadEncrypt)?;
+    let alice_identity_bytes = postcard::to_allocvec(&alice_kem.x25519_public.to_bytes())
+        .map_err(|_| CryptoError::AeadEncrypt)?;
     let initial_ct = aead_encrypt(&session_key, initial_plaintext, &alice_identity_bytes)?;
 
     // HMAC over header fields for integrity (using session key as MAC key)
-    let alice_id_bytes =
-        postcard::to_allocvec(&alice_kem.x25519_public.to_bytes()).map_err(|_| CryptoError::AeadEncrypt)?;
-    let mlkem_ct_bytes =
-        postcard::to_allocvec(&mlkem_ct).map_err(|_| CryptoError::AeadEncrypt)?;
+    let alice_id_bytes = postcard::to_allocvec(&alice_kem.x25519_public.to_bytes())
+        .map_err(|_| CryptoError::AeadEncrypt)?;
+    let mlkem_ct_bytes = postcard::to_allocvec(&mlkem_ct).map_err(|_| CryptoError::AeadEncrypt)?;
     let mut mac_input = Vec::new();
     mac_input.extend_from_slice(&alice_id_bytes);
     mac_input.extend_from_slice(&alice_ek_pub.to_bytes());
     mac_input.extend_from_slice(&mlkem_ct_bytes);
-    let mac = crate::crypto::primitives::hmac_sign_raw(
-        &session_key.0,
-        &mac_input,
-    );
+    let mac = crate::crypto::primitives::hmac_sign_raw(&session_key.0, &mac_input);
 
-    let alice_identity = PublicKeyBundle::from_keypairs(alice_kem, alice_signing, String::new());
+    let alice_identity =
+        PublicKeyBundle::from_keypairs(alice_kem, alice_signing, alice_nym_address);
 
     Ok((
         HandshakeInitMessage {
@@ -130,26 +128,23 @@ pub fn perform_handshake_bob(
     // Derive session key (must match Alice's derivation)
     let session_key = combine_dh_outputs(dh1.as_bytes(), dh2.as_bytes(), dh3.as_bytes(), &dh4_ss)?;
 
-    // Verify MAC
-    let alice_id_bytes =
-        postcard::to_allocvec(&bob_kem.x25519_public.to_bytes()).map_err(|_| CryptoError::AeadDecrypt)?;
+    // Verify MAC — must use Alice's x25519 pub (from msg) to match Alice's MAC input
+    let alice_id_bytes = postcard::to_allocvec(&msg.alice_identity.x25519_pub)
+        .map_err(|_| CryptoError::AeadDecrypt)?;
     let mlkem_ct_bytes =
         postcard::to_allocvec(&msg.alice_mlkem_ct).map_err(|_| CryptoError::AeadDecrypt)?;
     let mut mac_input = Vec::new();
     mac_input.extend_from_slice(&alice_id_bytes);
     mac_input.extend_from_slice(&msg.alice_ek_x25519);
     mac_input.extend_from_slice(&mlkem_ct_bytes);
-    let expected_mac = crate::crypto::primitives::hmac_sign_raw(
-        &session_key.0,
-        &mac_input,
-    );
+    let expected_mac = crate::crypto::primitives::hmac_sign_raw(&session_key.0, &mac_input);
     if expected_mac != msg.mac {
         return Err(CryptoError::AeadDecrypt);
     }
 
     // Decrypt initial payload
-    let alice_id_bytes =
-        postcard::to_allocvec(&msg.alice_identity.x25519_pub).map_err(|_| CryptoError::AeadDecrypt)?;
+    let alice_id_bytes = postcard::to_allocvec(&msg.alice_identity.x25519_pub)
+        .map_err(|_| CryptoError::AeadDecrypt)?;
     let plaintext = aead_decrypt(&session_key, &msg.initial_ct, &alice_id_bytes)?;
 
     Ok((plaintext, session_key))

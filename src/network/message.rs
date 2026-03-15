@@ -1,5 +1,5 @@
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::hmac_auth::MessageMac;
@@ -18,8 +18,8 @@ pub enum WireMessageType {
     Data,
     Revocation,
     Ack,
-    Loop,   // cover traffic loop message (sent to self)
-    Dummy,  // cover traffic filler
+    Loop,  // cover traffic loop message (sent to self)
+    Dummy, // cover traffic filler
 }
 
 /// The outer wire message sent via Nym.

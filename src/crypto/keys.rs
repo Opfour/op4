@@ -1,11 +1,11 @@
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use ml_kem::{
     kem::{Decapsulate, DecapsulationKey, Encapsulate, EncapsulationKey},
     EncodedSizeUser, KemCore, MlKem768, MlKem768Params,
 };
-use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::ZeroizeOnDrop;
 
 use crate::crypto::primitives::{hkdf_expand, SymKey, AEAD_KEY_LEN};
@@ -43,6 +43,36 @@ impl HybridKemKeypair {
     pub fn mlkem_ek_bytes(&self) -> Vec<u8> {
         self.mlkem_ek.as_bytes().to_vec()
     }
+
+    /// Serialize to bytes: X25519 secret (32) || ML-KEM-768 decapsulation key (2400).
+    /// Total: 2432 bytes.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2432);
+        out.extend_from_slice(&self.x25519_secret.to_bytes());
+        out.extend_from_slice(&self.mlkem_dk.as_bytes());
+        out
+    }
+
+    /// Reconstruct from the 2432 bytes produced by `to_bytes()`.
+    pub fn from_bytes(b: &[u8]) -> Result<Self, CryptoError> {
+        if b.len() != 2432 {
+            return Err(CryptoError::KeyParse);
+        }
+        let x25519_bytes: [u8; 32] = b[0..32].try_into().map_err(|_| CryptoError::KeyParse)?;
+        let x25519_secret = StaticSecret::from(x25519_bytes);
+        let x25519_public = X25519PublicKey::from(&x25519_secret);
+
+        let dk_bytes: &[u8; 2400] = b[32..2432].try_into().map_err(|_| CryptoError::KeyParse)?;
+        let mlkem_dk = DecapsulationKey::<MlKem768Params>::from_bytes(dk_bytes.into());
+        let mlkem_ek = Box::new(mlkem_dk.encapsulation_key().clone());
+
+        Ok(Self {
+            x25519_secret,
+            x25519_public,
+            mlkem_dk: Box::new(mlkem_dk),
+            mlkem_ek,
+        })
+    }
 }
 
 // ─── Hybrid Signing Keypair ───────────────────────────────────────────────────
@@ -62,12 +92,15 @@ pub struct HybridSigningKeypair {
     pub ed25519_vk: VerifyingKey,
     #[zeroize(skip)]
     pub mldsa_keypair: Box<ml_dsa::KeyPair<ml_dsa::MlDsa65>>,
+    /// ML-DSA 32-byte seed — retained so the keypair can be serialized and
+    /// reconstructed from the vault without storing the full 4 KB secret key.
+    mldsa_seed: [u8; 32],
 }
 
 impl HybridSigningKeypair {
     pub fn generate() -> Self {
+        use hybrid_array::{typenum::U32, Array};
         use ml_dsa::KeyGen;
-        use hybrid_array::{Array, typenum::U32};
 
         let ed25519_sk = SigningKey::generate(&mut OsRng);
         let ed25519_vk = ed25519_sk.verifying_key();
@@ -86,7 +119,41 @@ impl HybridSigningKeypair {
             ed25519_sk,
             ed25519_vk,
             mldsa_keypair: Box::new(mldsa_keypair),
+            mldsa_seed: seed_bytes,
         }
+    }
+
+    /// Serialize to 64 bytes: Ed25519 secret key (32) || ML-DSA seed (32).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(64);
+        out.extend_from_slice(&self.ed25519_sk.to_bytes());
+        out.extend_from_slice(&self.mldsa_seed);
+        out
+    }
+
+    /// Reconstruct from the 64 bytes produced by `to_bytes()`.
+    pub fn from_bytes(b: &[u8]) -> Result<Self, CryptoError> {
+        use hybrid_array::{typenum::U32, Array};
+        use ml_dsa::KeyGen;
+
+        if b.len() != 64 {
+            return Err(CryptoError::KeyParse);
+        }
+        let ed25519_sk_bytes: [u8; 32] = b[0..32].try_into().map_err(|_| CryptoError::KeyParse)?;
+        let mldsa_seed: [u8; 32] = b[32..64].try_into().map_err(|_| CryptoError::KeyParse)?;
+
+        let ed25519_sk = SigningKey::from_bytes(&ed25519_sk_bytes);
+        let ed25519_vk = ed25519_sk.verifying_key();
+
+        let seed: Array<u8, U32> = mldsa_seed[..].try_into().expect("seed is 32 bytes");
+        let mldsa_keypair = ml_dsa::MlDsa65::from_seed(&seed);
+
+        Ok(Self {
+            ed25519_sk,
+            ed25519_vk,
+            mldsa_keypair: Box::new(mldsa_keypair),
+            mldsa_seed,
+        })
     }
 }
 
@@ -99,9 +166,9 @@ pub struct PublicKeyBundle {
     pub version: u8,
     pub nym_address: String,
     pub x25519_pub: [u8; 32],
-    pub mlkem_ek: Vec<u8>,    // 1184 bytes for ML-KEM-768
+    pub mlkem_ek: Vec<u8>, // 1184 bytes for ML-KEM-768
     pub ed25519_vk: [u8; 32],
-    pub mldsa_vk: Vec<u8>,   // 1952 bytes for ML-DSA-65
+    pub mldsa_vk: Vec<u8>, // 1952 bytes for ML-DSA-65
 }
 
 impl PublicKeyBundle {
@@ -112,11 +179,7 @@ impl PublicKeyBundle {
         nym_address: String,
     ) -> Self {
         // encode() → EncodedVerifyingKey<P> which implements AsRef<[u8]>.
-        let mldsa_vk_bytes: Vec<u8> = signing
-            .mldsa_keypair
-            .verifying_key()
-            .encode()
-            .to_vec();
+        let mldsa_vk_bytes: Vec<u8> = signing.mldsa_keypair.verifying_key().encode().to_vec();
         Self {
             version: 1,
             nym_address,
@@ -132,9 +195,9 @@ impl PublicKeyBundle {
     pub fn fingerprint(&self) -> String {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
-        h.update(&self.x25519_pub);
+        h.update(self.x25519_pub);
         h.update(&self.mlkem_ek);
-        h.update(&self.ed25519_vk);
+        h.update(self.ed25519_vk);
         h.update(&self.mldsa_vk);
         let digest = h.finalize();
         digest
@@ -176,8 +239,7 @@ pub fn hybrid_verify(
 ) -> Result<(), CryptoError> {
     // ── Ed25519 verify ────────────────────────────────────────────────────────
     let ed_vk = VerifyingKey::from_bytes(&bundle.ed25519_vk).map_err(|_| CryptoError::SigVerify)?;
-    let ed_sig =
-        Signature::from_slice(&sig.ed25519).map_err(|_| CryptoError::SigVerify)?;
+    let ed_sig = Signature::from_slice(&sig.ed25519).map_err(|_| CryptoError::SigVerify)?;
     ed_vk
         .verify(message, &ed_sig)
         .map_err(|_| CryptoError::SigVerify)?;
@@ -214,7 +276,7 @@ pub fn hybrid_verify(
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HybridKemCiphertext {
     pub mlkem_ct: Vec<u8>, // ML-KEM-768 ciphertext (1088 bytes)
-    // x25519 shared secret is derived from peer's public key + our secret — no ciphertext needed
+                           // x25519 shared secret is derived from peer's public key + our secret — no ciphertext needed
 }
 
 /// Encapsulate: derive shared secret toward `peer_bundle`.
@@ -236,7 +298,9 @@ pub fn hybrid_kem_encapsulate(
             .try_into()
             .map_err(|_| CryptoError::KeyParse)?,
     );
-    let (mlkem_ct, mlkem_ss) = peer_ek.encapsulate(&mut OsRng).map_err(|_| CryptoError::KemEncap)?;
+    let (mlkem_ct, mlkem_ss) = peer_ek
+        .encapsulate(&mut OsRng)
+        .map_err(|_| CryptoError::KemEncap)?;
 
     // Combine: HKDF(x25519_ss || mlkem_ss)
     let ikm: Vec<u8> = x25519_ss

@@ -1,11 +1,13 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rand::RngCore;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::primitives::{aead_decrypt, aead_encrypt, argon2id_derive, Argon2Params, SymKey};
+use crate::crypto::primitives::{
+    aead_decrypt, aead_encrypt, argon2id_derive, Argon2Params, SymKey,
+};
 use crate::error::VaultError;
 use crate::identity::profile::StoredContact;
 
@@ -30,7 +32,7 @@ pub struct ConversationMeta {
 /// Stored message (inside encrypted message log).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredMessage {
-    pub counter: u64,    // monotonic, no wall-clock time
+    pub counter: u64, // monotonic, no wall-clock time
     pub content: String,
     pub from_us: bool,
 }
@@ -54,7 +56,7 @@ impl Default for AppSettings {
 }
 
 /// Decrypted vault payload.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct VaultPayload {
     pub nym_address: String,
     /// Our identity KEM keypair bytes (X25519 secret + ML-KEM DK)
@@ -66,20 +68,6 @@ pub struct VaultPayload {
     pub settings: AppSettings,
     /// Monotonic sequence counter (incremented each time vault is saved)
     pub sequence: u64,
-}
-
-impl Default for VaultPayload {
-    fn default() -> Self {
-        Self {
-            nym_address: String::new(),
-            identity_kem_secret: Vec::new(),
-            identity_signing_secret: Vec::new(),
-            contacts: Vec::new(),
-            conversations: Vec::new(),
-            settings: AppSettings::default(),
-            sequence: 0,
-        }
-    }
 }
 
 /// An unlocked vault with its decrypted payload.
@@ -172,6 +160,48 @@ impl VaultUnlocked {
         } else {
             Err(VaultError::InvalidPassphrase)
         }
+    }
+
+    /// Derive a per-conversation AEAD key from the vault master key.
+    ///
+    /// Uses HKDF-SHA256 with the master key as IKM and
+    /// `"op4-conv-key-v1" || conversation_id` as the info field.
+    /// The result is used to encrypt/decrypt `ConversationMeta::ratchet_state_ct`.
+    pub fn derive_conversation_key(&self, conversation_id: &[u8; 32]) -> SymKey {
+        use crate::crypto::primitives::hkdf_expand;
+        let mut info = b"op4-conv-key-v1".to_vec();
+        info.extend_from_slice(conversation_id);
+        let mut out = [0u8; 32];
+        hkdf_expand(&self.master_key.0, None, &info, &mut out)
+            .expect("HKDF expand is infallible for a 32-byte output");
+        SymKey(out)
+    }
+
+    /// Find the index of a `ConversationMeta` whose `contact_id` matches.
+    pub fn find_conversation_by_contact(&self, contact_id: &[u8; 32]) -> Option<usize> {
+        self.payload
+            .conversations
+            .iter()
+            .position(|c| &c.contact_id == contact_id)
+    }
+
+    /// Return a mutable reference to the `ConversationMeta` for `contact_id`,
+    /// creating a fresh one if none exists yet.
+    pub fn get_or_create_conversation(&mut self, contact_id: [u8; 32]) -> &mut ConversationMeta {
+        if self.find_conversation_by_contact(&contact_id).is_none() {
+            let mut id = [0u8; 32];
+            OsRng.fill_bytes(&mut id);
+            self.payload.conversations.push(ConversationMeta {
+                id,
+                contact_id,
+                ratchet_state_ct: Vec::new(),
+                message_log_ct: Vec::new(),
+                unread_count: 0,
+                auto_delete_after: None,
+            });
+        }
+        let idx = self.find_conversation_by_contact(&contact_id).unwrap();
+        &mut self.payload.conversations[idx]
     }
 
     /// Save the vault atomically (tmp file + rename).
@@ -270,10 +300,8 @@ fn build_vault_file(
     duress_key: &SymKey,
     duress_payload: &VaultPayload,
 ) -> Result<Vec<u8>, VaultError> {
-    let normal_bytes =
-        postcard::to_allocvec(normal_payload).map_err(|_| VaultError::Corrupt)?;
-    let duress_bytes =
-        postcard::to_allocvec(duress_payload).map_err(|_| VaultError::Corrupt)?;
+    let normal_bytes = postcard::to_allocvec(normal_payload).map_err(|_| VaultError::Corrupt)?;
+    let duress_bytes = postcard::to_allocvec(duress_payload).map_err(|_| VaultError::Corrupt)?;
 
     let mut normal_ct = aead_encrypt(normal_key, &normal_bytes, VAULT_MAGIC)?;
     let mut duress_ct = aead_encrypt(duress_key, &duress_bytes, VAULT_MAGIC)?;

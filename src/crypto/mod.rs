@@ -1,5 +1,5 @@
-pub mod primitives;
-pub mod keys;
 pub mod handshake;
-pub mod ratchet;
 pub mod hmac_auth;
+pub mod keys;
+pub mod primitives;
+pub mod ratchet;

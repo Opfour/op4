@@ -35,12 +35,12 @@ impl ContactCode {
 /// A stored contact in the vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredContact {
-    pub id: [u8; 32],          // SHA-256 of their full contact code bytes
+    pub id: [u8; 32], // SHA-256 of their full contact code bytes
     pub bundle: PublicKeyBundle,
     pub display_name: String,
-    pub verified: bool,        // did user verify fingerprint out-of-band?
-    pub last_key_seq: u64,     // monotonic sequence to detect key changes
-    pub added_seq: u64,        // monotonic counter at time of addition (no wall clock)
+    pub verified: bool,    // did user verify fingerprint out-of-band?
+    pub last_key_seq: u64, // monotonic sequence to detect key changes
+    pub added_seq: u64,    // monotonic counter at time of addition (no wall clock)
 }
 
 impl StoredContact {
