@@ -19,6 +19,8 @@ use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundl
 use crate::crypto::primitives::MacKey;
 use crate::crypto::ratchet::{MessageHeader, RatchetState};
 use crate::identity::profile::{ContactCode, StoredContact};
+use crate::identity::revocation::{RevocationCertificate, RevocationReason};
+use rand::rngs::OsRng;
 use crate::network::message::{WireMessage, WireMessageType};
 use crate::network::nym_client::NymClient;
 use crate::storage::vault::{StoredMessage, VaultUnlocked};
@@ -51,6 +53,16 @@ enum ContactMode {
     PendingRequest,
 }
 
+/// Edit/confirmation mode within the Settings tab.
+#[derive(Debug, Clone, PartialEq)]
+enum SettingsEditMode {
+    None,
+    EditTorAddr,
+    EditAutoDelete,
+    ConfirmRotate,
+    ConfirmRevoke,
+}
+
 /// A completed handshake from an unknown contact awaiting user acceptance.
 /// Crypto work is already done; we just need the user to assign a name.
 struct PendingHandshake {
@@ -79,6 +91,8 @@ struct AppState {
     loaded_contact_idx: Option<usize>,
     // Settings
     settings_list: ListState,
+    settings_edit_mode: SettingsEditMode,
+    settings_edit_buf: String,
     // Status bar
     status: String,
 }
@@ -104,6 +118,8 @@ impl AppState {
             active_contact_idx: None,
             loaded_contact_idx: None,
             settings_list,
+            settings_edit_mode: SettingsEditMode::None,
+            settings_edit_buf: String::new(),
             status: contacts_help(0),
         }
     }
@@ -194,7 +210,13 @@ fn build_export_code(vault: &VaultUnlocked) -> String {
         Ok(s) => s,
         Err(_) => return "[Key decode error — vault may be corrupt]".into(),
     };
-    let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, vault.payload.nym_address.clone());
+    let ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
+        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        x25519_dalek::PublicKey::from(&StaticSecret::from(bytes)).to_bytes()
+    } else {
+        kem.x25519_public.to_bytes() // fallback for vaults without ratchet key
+    };
+    let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, ratchet_pub, vault.payload.nym_address.clone());
     ContactCode(bundle).encode()
 }
 
@@ -258,6 +280,9 @@ fn draw(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked) {
                 &mut app.settings_list,
                 chunks[1],
             );
+            if app.settings_edit_mode != SettingsEditMode::None {
+                draw_settings_edit_popup(f, app, chunks[1]);
+            }
         }
     }
 
@@ -410,6 +435,68 @@ fn draw_pending_request_popup(f: &mut Frame, app: &AppState, area: Rect) {
     }
 }
 
+fn draw_settings_edit_popup(f: &mut Frame, app: &AppState, area: Rect) {
+    let popup = centered_rect(60, 40, area);
+    f.render_widget(Clear, popup);
+    match &app.settings_edit_mode {
+        SettingsEditMode::EditTorAddr => {
+            let content = Paragraph::new(vec![
+                Line::from("Enter new Tor SOCKS5 address (e.g. 127.0.0.1:9050):"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    app.settings_edit_buf.as_str(),
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(""),
+                Line::from("Enter:save  Esc:cancel"),
+            ])
+            .block(Block::default().borders(Borders::ALL).title("Edit Tor SOCKS5 Address"));
+            f.render_widget(content, popup);
+        }
+        SettingsEditMode::EditAutoDelete => {
+            let content = Paragraph::new(vec![
+                Line::from("Enter message count for auto-delete (blank = disable):"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    app.settings_edit_buf.as_str(),
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(""),
+                Line::from("Enter:save  Esc:cancel"),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Edit Auto-Delete Threshold"),
+            );
+            f.render_widget(content, popup);
+        }
+        SettingsEditMode::ConfirmRotate => {
+            let content = Paragraph::new(
+                "Rotate your identity keys?\n\n\
+                 This generates a new keypair, sends a revocation certificate\n\
+                 to all contacts, and invalidates your current contact code.\n\n\
+                 y:confirm  Esc/n:cancel",
+            )
+            .style(Style::default().fg(Color::Yellow))
+            .block(Block::default().borders(Borders::ALL).title("Confirm Key Rotation"));
+            f.render_widget(content, popup);
+        }
+        SettingsEditMode::ConfirmRevoke => {
+            let content = Paragraph::new(
+                "Revoke your current identity key?\n\n\
+                 This sends a retirement revocation certificate to all contacts.\n\
+                 Use Rotate instead to replace the key with a new one.\n\n\
+                 y:confirm  Esc/n:cancel",
+            )
+            .style(Style::default().fg(Color::Red))
+            .block(Block::default().borders(Borders::ALL).title("Confirm Key Revocation"));
+            f.render_widget(content, popup);
+        }
+        SettingsEditMode::None => {}
+    }
+}
+
 fn draw_conversation(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked, area: Rect) {
     if vault.payload.contacts.is_empty() {
         let help = Paragraph::new("Add a contact in the Contacts tab first.")
@@ -455,7 +542,7 @@ fn handle_key(
     match app.tab {
         Tab::Contacts => handle_contacts_key(app, key, vault),
         Tab::Conversation => handle_conversation_key(app, key, vault, nym),
-        Tab::Settings => handle_settings_key(app, key, vault),
+        Tab::Settings => handle_settings_key(app, key, vault, nym),
     }
 }
 
@@ -674,15 +761,24 @@ fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked) {
     let new_idx = vault.payload.contacts.len() - 1;
     app.contacts_list.select(Some(new_idx));
 
-    // Reconstruct our KEM keypair and initialise Bob's ratchet.
-    if let Ok(our_kem) = HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
-        let bob_ratchet_secret = StaticSecret::from(our_kem.x25519_secret.to_bytes());
-        let ratchet = RatchetState::init_bob(pending.session_key_bytes, bob_ratchet_secret);
-        let conv_key = vault.derive_conversation_key(&contact_id);
-        if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
-            let conv = vault.get_or_create_conversation(contact_id);
-            conv.ratchet_state_ct = ratchet_ct;
+    // Initialise Bob's ratchet using the dedicated ratchet secret (or KEM fallback).
+    let bob_ratchet_secret = if vault.payload.identity_ratchet_secret.len() == 32 {
+        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        StaticSecret::from(bytes)
+    } else {
+        match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+            Ok(our_kem) => StaticSecret::from(our_kem.x25519_secret.to_bytes()),
+            Err(_) => {
+                app.status = "Key error — vault may be corrupt.".into();
+                return;
+            }
         }
+    };
+    let ratchet = RatchetState::init_bob(pending.session_key_bytes, bob_ratchet_secret);
+    let conv_key = vault.derive_conversation_key(&contact_id);
+    if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
+        let conv = vault.get_or_create_conversation(contact_id);
+        conv.ratchet_state_ct = ratchet_ct;
     }
 
     // Persist the initial message.
@@ -749,9 +845,99 @@ fn handle_conversation_key(
 fn handle_settings_key(
     app: &mut AppState,
     key: crossterm::event::KeyEvent,
-    _vault: &mut VaultUnlocked,
+    vault: &mut VaultUnlocked,
+    nym: &mut NymClient,
 ) {
     const NUM_SETTINGS: usize = 6;
+
+    // Active edit/confirm modes intercept all keys.
+    match app.settings_edit_mode.clone() {
+        SettingsEditMode::EditTorAddr => {
+            match key.code {
+                KeyCode::Esc => {
+                    app.settings_edit_mode = SettingsEditMode::None;
+                    app.settings_edit_buf.clear();
+                    app.status = "↑↓:navigate  Enter:select  1:contacts  q:quit".into();
+                }
+                KeyCode::Enter => {
+                    let val = app.settings_edit_buf.trim().to_owned();
+                    if !val.is_empty() {
+                        vault.payload.settings.tor_socks_addr = val;
+                        vault.save().ok();
+                        app.status = "Tor SOCKS5 address updated. Restart to apply.".into();
+                    } else {
+                        app.status = "No change — address cannot be empty.".into();
+                    }
+                    app.settings_edit_mode = SettingsEditMode::None;
+                    app.settings_edit_buf.clear();
+                }
+                KeyCode::Backspace => {
+                    app.settings_edit_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.settings_edit_buf.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+        SettingsEditMode::EditAutoDelete => {
+            match key.code {
+                KeyCode::Esc => {
+                    app.settings_edit_mode = SettingsEditMode::None;
+                    app.settings_edit_buf.clear();
+                    app.status = "↑↓:navigate  Enter:select  1:contacts  q:quit".into();
+                }
+                KeyCode::Enter => {
+                    let val = app.settings_edit_buf.trim().to_owned();
+                    vault.payload.settings.default_auto_delete = if val.is_empty() {
+                        None
+                    } else {
+                        val.parse::<u32>().ok()
+                    };
+                    vault.save().ok();
+                    app.status = "Auto-delete threshold updated.".into();
+                    app.settings_edit_mode = SettingsEditMode::None;
+                    app.settings_edit_buf.clear();
+                }
+                KeyCode::Backspace => {
+                    app.settings_edit_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.settings_edit_buf.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+        SettingsEditMode::ConfirmRotate => {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    rotate_keys(app, vault, nym);
+                }
+                _ => {
+                    app.status = "Key rotation cancelled.".into();
+                }
+            }
+            app.settings_edit_mode = SettingsEditMode::None;
+            return;
+        }
+        SettingsEditMode::ConfirmRevoke => {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    revoke_key(app, vault, nym);
+                }
+                _ => {
+                    app.status = "Key revocation cancelled.".into();
+                }
+            }
+            app.settings_edit_mode = SettingsEditMode::None;
+            return;
+        }
+        SettingsEditMode::None => {}
+    }
+
+    // Normal navigation.
     match key.code {
         KeyCode::Up => {
             let i = app.settings_list.selected().unwrap_or(0);
@@ -763,15 +949,40 @@ fn handle_settings_key(
             app.settings_list.select(Some((i + 1) % NUM_SETTINGS));
         }
         KeyCode::Enter => match app.settings_list.selected().unwrap_or(0) {
+            0 => {
+                // Edit Tor SOCKS5 address
+                app.settings_edit_buf = vault.payload.settings.tor_socks_addr.clone();
+                app.settings_edit_mode = SettingsEditMode::EditTorAddr;
+                app.status = "Edit Tor address. Enter:save  Esc:cancel".into();
+            }
+            2 => {
+                // Edit auto-delete threshold
+                app.settings_edit_buf = vault
+                    .payload
+                    .settings
+                    .default_auto_delete
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                app.settings_edit_mode = SettingsEditMode::EditAutoDelete;
+                app.status = "Enter count (blank=disable). Enter:save  Esc:cancel".into();
+            }
+            3 => {
+                // Rotate identity keys
+                app.settings_edit_mode = SettingsEditMode::ConfirmRotate;
+                app.status = "Confirm key rotation? y:yes  Esc/n:cancel".into();
+            }
+            4 => {
+                // Revoke key
+                app.settings_edit_mode = SettingsEditMode::ConfirmRevoke;
+                app.status = "Confirm key revocation? y:yes  Esc/n:cancel".into();
+            }
             5 => {
                 // Export contact code
                 app.tab = Tab::Contacts;
                 app.contact_mode = ContactMode::ExportCode;
                 app.status = "Your contact code — press Esc to close.".into();
             }
-            _ => {
-                app.status = "Setting configuration not yet implemented.".into();
-            }
+            _ => {}
         },
         KeyCode::Char('1') => {
             app.tab = Tab::Contacts;
@@ -893,9 +1104,17 @@ fn send_message(
                 }
             };
 
+        let our_ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
+            let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+            x25519_dalek::PublicKey::from(&StaticSecret::from(bytes)).to_bytes()
+        } else {
+            our_kem.x25519_public.to_bytes()
+        };
+
         let (hs_msg, session_key) = match perform_handshake_alice(
             &our_kem,
             &our_signing,
+            our_ratchet_pub,
             vault.payload.nym_address.clone(),
             &contact.bundle,
             plaintext,
@@ -907,8 +1126,13 @@ fn send_message(
             }
         };
 
-        // Initialise Alice's ratchet with Bob's identity X25519 pub.
-        let bob_ratchet_pub = X25519PublicKey::from(contact.bundle.x25519_pub);
+        // Initialise Alice's ratchet with Bob's dedicated ratchet pub.
+        // Fall back to KEM X25519 pub for contacts with older contact codes.
+        let bob_ratchet_pub = if contact.bundle.ratchet_pub != [0u8; 32] {
+            X25519PublicKey::from(contact.bundle.ratchet_pub)
+        } else {
+            X25519PublicKey::from(contact.bundle.x25519_pub)
+        };
         let ratchet = RatchetState::init_alice(session_key.0, bob_ratchet_pub);
 
         // Persist ratchet state.
@@ -1015,7 +1239,13 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
         Some(idx) => {
             // Known contact — set up ratchet and display message immediately.
             let contact_id = vault.payload.contacts[idx].id;
-            let bob_ratchet_secret = StaticSecret::from(our_kem.x25519_secret.to_bytes());
+            let bob_ratchet_secret = if vault.payload.identity_ratchet_secret.len() == 32 {
+                let bytes: [u8; 32] =
+                    vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+                StaticSecret::from(bytes)
+            } else {
+                StaticSecret::from(our_kem.x25519_secret.to_bytes())
+            };
             let ratchet = RatchetState::init_bob(session_key.0, bob_ratchet_secret);
             let conv_key = vault.derive_conversation_key(&contact_id);
             if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
@@ -1138,6 +1368,161 @@ fn handle_inbound_data(
         return;
     }
     // No ratchet matched — silently drop (cover traffic or unknown sender).
+}
+
+// ─── Key Rotation and Revocation ──────────────────────────────────────────────
+
+/// Generate new identity keypairs, broadcast a revocation cert to all contacts,
+/// and update the vault. The export code is refreshed in `app.export_code`.
+fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient) {
+    let old_signing =
+        match HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret) {
+            Ok(s) => s,
+            Err(_) => {
+                app.status = "Key rotation failed: cannot load current signing key.".into();
+                return;
+            }
+        };
+    let old_kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+        Ok(k) => k,
+        Err(_) => {
+            app.status = "Key rotation failed: cannot load current KEM key.".into();
+            return;
+        }
+    };
+
+    // Build old fingerprint (needed for the revocation cert body).
+    let old_ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
+        let b: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        x25519_dalek::PublicKey::from(&StaticSecret::from(b)).to_bytes()
+    } else {
+        old_kem.x25519_public.to_bytes()
+    };
+    let old_bundle = PublicKeyBundle::from_keypairs(
+        &old_kem,
+        &old_signing,
+        old_ratchet_pub,
+        String::new(),
+    );
+    let old_fp = old_bundle.fingerprint();
+
+    // Generate new keypairs.
+    let new_kem = HybridKemKeypair::generate();
+    let new_signing = HybridSigningKeypair::generate();
+    let new_ratchet = StaticSecret::random_from_rng(OsRng);
+    let new_ratchet_pub = x25519_dalek::PublicKey::from(&new_ratchet).to_bytes();
+    let new_bundle = PublicKeyBundle::from_keypairs(
+        &new_kem,
+        &new_signing,
+        new_ratchet_pub,
+        vault.payload.nym_address.clone(),
+    );
+
+    // Sign revocation cert with OLD key so contacts can verify it.
+    let seq = vault.payload.sequence;
+    vault.payload.sequence += 1;
+    let cert = RevocationCertificate::create(
+        &old_signing,
+        old_fp,
+        old_kem.x25519_public.to_bytes(),
+        RevocationReason::Rotation,
+        seq,
+        Some(new_bundle),
+    );
+
+    // Broadcast to all contacts.
+    let cert_bytes = postcard::to_allocvec(&cert).unwrap_or_default();
+    let wire = WireMessage {
+        msg_type: WireMessageType::Revocation,
+        header: MessageHeader {
+            dh_pub: [0u8; 32],
+            pn: 0,
+            n: 0,
+        },
+        ciphertext: cert_bytes,
+        mac: MessageMac { tag: [0u8; 32] },
+    };
+    let wire_bytes = wire.to_bytes();
+    for contact in &vault.payload.contacts {
+        if !contact.bundle.nym_address.is_empty() {
+            nym.send(&contact.bundle.nym_address, wire_bytes.clone()).ok();
+        }
+    }
+
+    // Update vault with new keys and refresh export code.
+    vault.payload.identity_kem_secret = new_kem.to_bytes();
+    vault.payload.identity_signing_secret = new_signing.to_bytes();
+    vault.payload.identity_ratchet_secret = new_ratchet.to_bytes().to_vec();
+    vault.save().ok();
+    app.export_code = build_export_code(vault);
+    app.status =
+        "Keys rotated. New contact code ready — share it with contacts via [e] or Settings > 6."
+            .into();
+}
+
+/// Broadcast a retirement revocation certificate and mark the key as revoked.
+/// Does NOT generate a new keypair — use `rotate_keys` for that.
+fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient) {
+    let old_signing =
+        match HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret) {
+            Ok(s) => s,
+            Err(_) => {
+                app.status = "Revocation failed: cannot load signing key.".into();
+                return;
+            }
+        };
+    let old_kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+        Ok(k) => k,
+        Err(_) => {
+            app.status = "Revocation failed: cannot load KEM key.".into();
+            return;
+        }
+    };
+
+    let old_ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
+        let b: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        x25519_dalek::PublicKey::from(&StaticSecret::from(b)).to_bytes()
+    } else {
+        old_kem.x25519_public.to_bytes()
+    };
+    let old_bundle = PublicKeyBundle::from_keypairs(
+        &old_kem,
+        &old_signing,
+        old_ratchet_pub,
+        String::new(),
+    );
+    let old_fp = old_bundle.fingerprint();
+
+    let seq = vault.payload.sequence;
+    vault.payload.sequence += 1;
+    let cert = RevocationCertificate::create(
+        &old_signing,
+        old_fp,
+        old_kem.x25519_public.to_bytes(),
+        RevocationReason::Retirement,
+        seq,
+        None,
+    );
+
+    let cert_bytes = postcard::to_allocvec(&cert).unwrap_or_default();
+    let wire = WireMessage {
+        msg_type: WireMessageType::Revocation,
+        header: MessageHeader {
+            dh_pub: [0u8; 32],
+            pn: 0,
+            n: 0,
+        },
+        ciphertext: cert_bytes,
+        mac: MessageMac { tag: [0u8; 32] },
+    };
+    let wire_bytes = wire.to_bytes();
+    for contact in &vault.payload.contacts {
+        if !contact.bundle.nym_address.is_empty() {
+            nym.send(&contact.bundle.nym_address, wire_bytes.clone()).ok();
+        }
+    }
+    vault.save().ok();
+    app.status = "Revocation certificate sent to all contacts.".into();
 }
 
 // ─── Utilities ────────────────────────────────────────────────────────────────

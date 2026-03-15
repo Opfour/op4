@@ -169,13 +169,16 @@ pub struct PublicKeyBundle {
     pub mlkem_ek: Vec<u8>, // 1184 bytes for ML-KEM-768
     pub ed25519_vk: [u8; 32],
     pub mldsa_vk: Vec<u8>, // 1952 bytes for ML-DSA-65
+    /// Dedicated X25519 public key for Double Ratchet bootstrap (separate from KEM key).
+    pub ratchet_pub: [u8; 32],
 }
 
 impl PublicKeyBundle {
-    /// Build a bundle from our keypairs and Nym address.
+    /// Build a bundle from our keypairs, dedicated ratchet public key, and Nym address.
     pub fn from_keypairs(
         kem: &HybridKemKeypair,
         signing: &HybridSigningKeypair,
+        ratchet_pub: [u8; 32],
         nym_address: String,
     ) -> Self {
         // encode() → EncodedVerifyingKey<P> which implements AsRef<[u8]>.
@@ -187,6 +190,7 @@ impl PublicKeyBundle {
             mlkem_ek: kem.mlkem_ek_bytes(),
             ed25519_vk: signing.ed25519_vk.to_bytes(),
             mldsa_vk: mldsa_vk_bytes,
+            ratchet_pub,
         }
     }
 
@@ -199,6 +203,7 @@ impl PublicKeyBundle {
         h.update(&self.mlkem_ek);
         h.update(self.ed25519_vk);
         h.update(&self.mldsa_vk);
+        h.update(self.ratchet_pub);
         let digest = h.finalize();
         digest
             .chunks(2)

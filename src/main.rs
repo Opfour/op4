@@ -20,6 +20,8 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair};
+use rand::rngs::OsRng;
+use x25519_dalek::StaticSecret;
 use crate::error::{AppError, VaultError};
 use crate::hardening::memory::apply_memory_hardening;
 use crate::hardening::seccomp::install_seccomp_filter;
@@ -204,8 +206,10 @@ fn create_new_vault(vault_path: &std::path::Path) -> Result<VaultUnlocked, AppEr
     eprintln!("Generating identity keypairs...");
     let kem_keypair = HybridKemKeypair::generate();
     let signing_keypair = HybridSigningKeypair::generate();
+    let ratchet_secret = StaticSecret::random_from_rng(OsRng);
     vault.payload.identity_kem_secret = kem_keypair.to_bytes();
     vault.payload.identity_signing_secret = signing_keypair.to_bytes();
+    vault.payload.identity_ratchet_secret = ratchet_secret.to_bytes().to_vec();
     vault.save().map_err(AppError::from)?;
 
     eprintln!("Vault created: {}", vault_path.display());
