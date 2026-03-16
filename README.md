@@ -11,10 +11,11 @@ anyone — not even the person you are talking to.
 ## Table of Contents
 
 1. [What op4 Does](#what-op4-does)
-2. [Security Model](#security-model)
-3. [Architecture Overview](#architecture-overview)
-4. [Project Layout](#project-layout)
-5. [Current Status](#current-status)
+2. [Installation](#installation)
+3. [Security Model](#security-model)
+4. [Architecture Overview](#architecture-overview)
+5. [Project Layout](#project-layout)
+6. [Current Status](#current-status)
 
 ---
 
@@ -37,6 +38,118 @@ revealing their IP address or real identity. Every message is:
 op4 runs entirely in the terminal. It has no GUI, no browser component,
 and no cloud account. The only external process it contacts is the Tor
 daemon running on your own machine.
+
+---
+
+## Installation
+
+### Dependencies
+
+Install all runtime and build dependencies before compiling.
+
+**Rust toolchain** (pinned to 1.88.0 via `rust-toolchain.toml`):
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+# restart your shell, then the correct toolchain will be selected automatically
+```
+
+**Tor** (must be running with control port enabled):
+
+```bash
+# Debian / Ubuntu
+sudo apt install tor
+
+# Fedora
+sudo dnf install tor
+
+# Arch
+sudo pacman -S tor
+```
+
+Then add these two lines to `/etc/tor/torrc` and restart Tor:
+
+```
+ControlPort 9051
+CookieAuthentication 1
+```
+
+```bash
+sudo systemctl restart tor
+
+# Give your user access to the Tor cookie file
+sudo usermod -aG debian-tor $USER   # Debian/Ubuntu
+# or
+sudo usermod -aG tor $USER          # Fedora/Arch
+
+# Log out and back in for the group change to take effect
+```
+
+**Build dependencies** (C linker + system headers required by some crates):
+
+```bash
+# Debian / Ubuntu
+sudo apt install build-essential pkg-config libssl-dev
+
+# Fedora
+sudo dnf install gcc pkg-config openssl-devel
+
+# Arch
+sudo pacman -S base-devel pkg-config openssl
+```
+
+### Build
+
+```bash
+git clone https://github.com/Opfour/op4.git
+cd op4
+cargo build --release
+```
+
+The compiled binary is at `target/release/op4`. You can run it directly
+from there, or use the install script below to place it system-wide.
+
+### System install (optional)
+
+[`install/setup.sh`](install/setup.sh) installs the binary to
+`/usr/local/bin/op4`, creates a dedicated `op4` system user, sets up
+`/var/lib/op4` with correct permissions, and loads the AppArmor profile
+if AppArmor is available on your system.
+
+```bash
+sudo bash install/setup.sh
+```
+
+> **Note:** The script expects the release binary to already exist at
+> `target/release/op4`. Run `cargo build --release` first.
+>
+> After installation, verify the source hash printed by the script
+> matches the published release hash for your version.
+
+### Run
+
+```bash
+op4
+# or, without installing:
+./target/release/op4
+```
+
+On first launch op4 will guide you through setting a normal passphrase
+and a duress passphrase, then generate your identity keys. Your vault is
+stored at `~/.local/share/op4/vault.op4`.
+
+### Supported platforms
+
+| Distro | Status |
+|---|---|
+| Ubuntu 22.04 / 24.04 | Supported |
+| Debian 12 | Supported |
+| Fedora 39+ | Supported |
+| Arch Linux (current) | Supported |
+| macOS / Windows / WSL1 | Not supported |
+
+Minimum kernel: **4.15** (5.4+ recommended). Architecture: **x86-64**
+(aarch64 should work but is untested).
 
 ---
 
