@@ -21,6 +21,13 @@ profile op4 /usr/local/bin/op4 {
     /dev/tty                                   rw,
     /dev/pts/[0-9]*                            rw,
 
+    # ── Tor control port cookie (read-only) ──────────────────────────────
+    # Required to authenticate to the Tor control port on startup.
+    # The file is owned by the debian-tor group; the running user must be
+    # a member of that group (setup.sh handles this automatically).
+    /run/tor/                   r,
+    /run/tor/control.authcookie r,
+
     # ── Tor SOCKS5 proxy (loopback only) ─────────────────────────────────
     # op4 connects to Tor at 127.0.0.1:9050 only.
     # No direct internet access — all traffic routes through Tor → Nym.
