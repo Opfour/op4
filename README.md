@@ -1,6 +1,8 @@
-<img src="docs/logo.jpeg" align="left" width="500" />   
+<img src="docs/logo.jpeg" align="left" width="500" />  
+</br>
+</br>
 
-# op4 — Secure Terminal Messenger
+<b>op4 — Secure Terminal Messenger</b>
 
 Op4 is a terminal-based encrypted messaging application written in Rust.
 It provides end-to-end encrypted private messaging with post-quantum
@@ -8,7 +10,11 @@ cryptography, routed entirely through the Tor network so that
 neither the content of your messages nor your IP address is exposed to
 anyone — not even the person you are talking to.
 
----
+</br>
+</br>
+</br>
+</br>
+</br>
 
 ## Table of Contents
 
