@@ -99,8 +99,8 @@ fn build_filter() -> Result<BpfProgram, String> {
         // File I/O (vault, Nym key storage)
         libc::SYS_read,
         libc::SYS_write,
-        libc::SYS_readv,    // scatter-gather read (Tokio I/O)
-        libc::SYS_writev,   // scatter-gather write (Tokio I/O, WebSocket frames)
+        libc::SYS_readv,  // scatter-gather read (Tokio I/O)
+        libc::SYS_writev, // scatter-gather write (Tokio I/O, WebSocket frames)
         libc::SYS_pread64,
         libc::SYS_pwrite64,
         libc::SYS_openat,
@@ -152,8 +152,8 @@ fn build_filter() -> Result<BpfProgram, String> {
         libc::SYS_recvfrom,
         libc::SYS_sendmsg,
         libc::SYS_recvmsg,
-        libc::SYS_sendmmsg,  // batch socket send (Nym SDK / WebSocket)
-        libc::SYS_recvmmsg,  // batch socket recv (Nym SDK / WebSocket)
+        libc::SYS_sendmmsg, // batch socket send (Nym SDK / WebSocket)
+        libc::SYS_recvmmsg, // batch socket recv (Nym SDK / WebSocket)
         libc::SYS_setsockopt,
         libc::SYS_getsockopt,
         libc::SYS_getsockname,
@@ -198,7 +198,7 @@ fn build_filter() -> Result<BpfProgram, String> {
         libc::SYS_getrlimit,
         libc::SYS_setrlimit,
         libc::SYS_prlimit64, // modern resource-limit query; glibc pthread_create
-                             // calls this to check RLIMIT_STACK on thread spawn
+        // calls this to check RLIMIT_STACK on thread spawn
         libc::SYS_uname,
     ];
 
