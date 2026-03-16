@@ -16,7 +16,8 @@ use crate::crypto::handshake::{
 };
 use crate::crypto::hmac_auth::{compute_message_mac, verify_message_mac, MessageMac};
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
-use crate::crypto::primitives::MacKey;
+use crate::crypto::primitives::{aead_decrypt, aead_encrypt, hkdf_expand, MacKey, SymKey};
+use serde::{Deserialize, Serialize};
 use crate::crypto::ratchet::{MessageHeader, RatchetState};
 use crate::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use crate::identity::revocation::{RevocationCertificate, RevocationReason};
@@ -76,7 +77,29 @@ struct PendingHandshake {
 /// When the peer replies, we match on `ed25519_vk` and verify `fingerprint_prefix`.
 struct BootstrapPending {
     ed25519_vk: [u8; 32],
-    fingerprint_prefix: [u8; 16],
+    fingerprint_prefix: [u8; 32],
+}
+
+/// Encrypted bundle request payload. Seals the requester's return address and
+/// X25519 public key with ephemeral ECDH so Tor relays cannot learn the social graph.
+#[derive(Serialize, Deserialize)]
+struct SealedBundleRequest {
+    ephemeral_pub: [u8; 32],
+    ciphertext: Vec<u8>,
+}
+
+/// Inner plaintext of an encrypted `BundleRequest`.
+#[derive(Serialize, Deserialize)]
+struct BundleRequestInner {
+    requester_addr: String,
+    requester_x25519_pub: [u8; 32],
+}
+
+/// Encrypted bundle response payload. Sealed with the requester's X25519 public key.
+#[derive(Serialize, Deserialize)]
+struct SealedBundleResponse {
+    ephemeral_pub: [u8; 32],
+    ciphertext: Vec<u8>,
 }
 
 struct AppState {
@@ -1602,75 +1625,179 @@ fn send_bundle_request(
     nym: &mut NymClient,
     bc: &BootstrapCode,
 ) {
-    // Record what fingerprint prefix we expect in the response.
+    // Record what fingerprint we expect in the response.
     app.pending_bundle_requests.push(BootstrapPending {
         ed25519_vk: bc.ed25519_vk,
         fingerprint_prefix: bc.fingerprint_prefix,
     });
 
-    // Payload: our return address so the peer knows where to send the bundle.
+    let kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
     let my_addr = vault.payload.nym_address.clone();
-    let payload =
-        postcard::to_allocvec(&my_addr).expect("String serialisation cannot fail");
+    let my_x25519_pub = kem.x25519_public.to_bytes();
 
+    // Ephemeral ECDH with Bob's x25519_pub → seals our return address and x25519 pub.
+    let eph_secret = StaticSecret::random_from_rng(OsRng);
+    let eph_pub = X25519PublicKey::from(&eph_secret);
+    let bob_x25519 = X25519PublicKey::from(bc.x25519_pub);
+    let shared = eph_secret.diffie_hellman(&bob_x25519);
+
+    let mut enc_key = [0u8; 32];
+    if hkdf_expand(shared.as_bytes(), Some(eph_pub.as_bytes()), b"op4-bundle-req-v1", &mut enc_key)
+        .is_err()
+    {
+        return;
+    }
+
+    let inner = BundleRequestInner { requester_addr: my_addr, requester_x25519_pub: my_x25519_pub };
+    let inner_bytes = postcard::to_allocvec(&inner).unwrap_or_default();
+    let ct = match aead_encrypt(&SymKey(enc_key), &inner_bytes, eph_pub.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let sealed = SealedBundleRequest { ephemeral_pub: eph_pub.to_bytes(), ciphertext: ct };
+    let payload = postcard::to_allocvec(&sealed).unwrap_or_default();
     let wire = WireMessage {
         msg_type: WireMessageType::BundleRequest,
-        header: crate::crypto::ratchet::MessageHeader {
-            dh_pub: [0u8; 32],
-            pn: 0,
-            n: 0,
-        },
+        header: crate::crypto::ratchet::MessageHeader { dh_pub: [0u8; 32], pn: 0, n: 0 },
         ciphertext: payload,
         mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
     };
     nym.send(&bc.nym_address, wire.to_bytes()).ok();
 }
 
-/// Handle an inbound `BundleRequest`: respond with our full `PublicKeyBundle`.
+/// Handle an inbound `BundleRequest`: decrypt the sealed request, then reply
+/// with a sealed `BundleResponse` using the requester's X25519 public key.
 fn handle_inbound_bundle_request(
     vault: &VaultUnlocked,
     nym: &mut NymClient,
     request_ciphertext: &[u8],
 ) {
-    // Decode the requester's return address.
-    let requester_addr: String = match postcard::from_bytes(request_ciphertext) {
-        Ok(a) => a,
+    // Decrypt the sealed request using our X25519 identity key.
+    let kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+        Ok(k) => k,
         Err(_) => return,
     };
-    if requester_addr.is_empty() {
+
+    let sealed: SealedBundleRequest = match postcard::from_bytes(request_ciphertext) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let eph_pub = X25519PublicKey::from(sealed.ephemeral_pub);
+    let shared = kem.x25519_secret.diffie_hellman(&eph_pub);
+
+    let mut dec_key = [0u8; 32];
+    if hkdf_expand(
+        shared.as_bytes(),
+        Some(&sealed.ephemeral_pub),
+        b"op4-bundle-req-v1",
+        &mut dec_key,
+    )
+    .is_err()
+    {
         return;
     }
 
-    // Build and serialise our full bundle.
+    let inner_bytes =
+        match aead_decrypt(&SymKey(dec_key), &sealed.ciphertext, &sealed.ephemeral_pub) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+    let inner: BundleRequestInner = match postcard::from_bytes(&inner_bytes) {
+        Ok(i) => i,
+        Err(_) => return,
+    };
+    if inner.requester_addr.is_empty() {
+        return;
+    }
+
+    // Build our full bundle.
     let bundle = match build_our_bundle(vault) {
         Some(b) => b,
-        None => return, // keys not yet generated
+        None => return,
     };
-    let bundle_bytes =
-        postcard::to_allocvec(&bundle).expect("PublicKeyBundle serialisation cannot fail");
+    let bundle_bytes = postcard::to_allocvec(&bundle).unwrap_or_default();
+
+    // Seal the response with the requester's X25519 public key.
+    let resp_eph_secret = StaticSecret::random_from_rng(OsRng);
+    let resp_eph_pub = X25519PublicKey::from(&resp_eph_secret);
+    let requester_x25519 = X25519PublicKey::from(inner.requester_x25519_pub);
+    let resp_shared = resp_eph_secret.diffie_hellman(&requester_x25519);
+
+    let mut resp_key = [0u8; 32];
+    if hkdf_expand(
+        resp_shared.as_bytes(),
+        Some(resp_eph_pub.as_bytes()),
+        b"op4-bundle-resp-v1",
+        &mut resp_key,
+    )
+    .is_err()
+    {
+        return;
+    }
+
+    let resp_ct = match aead_encrypt(&SymKey(resp_key), &bundle_bytes, resp_eph_pub.as_bytes()) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let sealed_resp =
+        SealedBundleResponse { ephemeral_pub: resp_eph_pub.to_bytes(), ciphertext: resp_ct };
+    let resp_payload = postcard::to_allocvec(&sealed_resp).unwrap_or_default();
 
     let wire = WireMessage {
         msg_type: WireMessageType::BundleResponse,
-        header: crate::crypto::ratchet::MessageHeader {
-            dh_pub: [0u8; 32],
-            pn: 0,
-            n: 0,
-        },
-        ciphertext: bundle_bytes,
+        header: crate::crypto::ratchet::MessageHeader { dh_pub: [0u8; 32], pn: 0, n: 0 },
+        ciphertext: resp_payload,
         mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
     };
-    nym.send(&requester_addr, wire.to_bytes()).ok();
+    nym.send(&inner.requester_addr, wire.to_bytes()).ok();
 }
 
-/// Handle an inbound `BundleResponse`: verify the fingerprint against any
-/// pending bootstrap request, then add the contact automatically.
+/// Handle an inbound `BundleResponse`: decrypt the sealed response, verify the
+/// full 32-byte fingerprint against the pending bootstrap request, then add contact.
 fn handle_inbound_bundle_response(
     app: &mut AppState,
     vault: &mut VaultUnlocked,
     ciphertext: &[u8],
 ) {
-    // Deserialise the full bundle from the response.
-    let bundle: PublicKeyBundle = match postcard::from_bytes(ciphertext) {
+    // Decrypt the sealed response using our X25519 identity key.
+    let kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+        Ok(k) => k,
+        Err(_) => return,
+    };
+
+    let sealed: SealedBundleResponse = match postcard::from_bytes(ciphertext) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+
+    let resp_eph_pub = X25519PublicKey::from(sealed.ephemeral_pub);
+    let shared = kem.x25519_secret.diffie_hellman(&resp_eph_pub);
+
+    let mut dec_key = [0u8; 32];
+    if hkdf_expand(
+        shared.as_bytes(),
+        Some(&sealed.ephemeral_pub),
+        b"op4-bundle-resp-v1",
+        &mut dec_key,
+    )
+    .is_err()
+    {
+        return;
+    }
+
+    let bundle_bytes =
+        match aead_decrypt(&SymKey(dec_key), &sealed.ciphertext, &sealed.ephemeral_pub) {
+            Ok(b) => b,
+            Err(_) => return,
+        };
+
+    let bundle: PublicKeyBundle = match postcard::from_bytes(&bundle_bytes) {
         Ok(b) => b,
         Err(_) => return,
     };
@@ -1685,9 +1812,9 @@ fn handle_inbound_bundle_response(
     h.update(bundle.ratchet_pub);
     let digest: [u8; 32] = h.finalize().into();
 
-    // Match against a pending request by ed25519_vk AND fingerprint prefix.
+    // Match against a pending request by ed25519_vk AND full 32-byte fingerprint.
     let pending_idx = app.pending_bundle_requests.iter().position(|p| {
-        p.ed25519_vk == bundle.ed25519_vk && p.fingerprint_prefix == digest[..16]
+        p.ed25519_vk == bundle.ed25519_vk && p.fingerprint_prefix == digest
     });
     let pending_idx = match pending_idx {
         Some(i) => i,

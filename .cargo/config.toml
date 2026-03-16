@@ -1,6 +1,14 @@
 [build]
 rustflags = ["-D", "warnings"]
 
+# Reproducible builds: use --locked to enforce exact Cargo.lock versions.
+# Set SOURCE_DATE_EPOCH=0 in the build environment to strip timestamps.
+# See: https://reproducible-builds.org/docs/source-date-epoch/
+#
+# To verify two independent builds produce identical binaries:
+#   SOURCE_DATE_EPOCH=0 cargo build --release --locked
+#   sha256sum target/release/op4  # compare on two machines
+
 [profile.release]
 opt-level = 3
 lto = "fat"
