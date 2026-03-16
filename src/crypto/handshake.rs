@@ -83,13 +83,17 @@ pub fn perform_handshake_alice(
     // Build the identity bundle first — it is used as AAD and MAC input so that
     // ALL identity fields (Ed25519, ML-DSA, ratchet pub, nym address) are
     // cryptographically bound to the message, preventing field substitution attacks.
-    let alice_identity =
-        PublicKeyBundle::from_keypairs(alice_kem, alice_signing, alice_ratchet_pub, alice_nym_address);
+    let alice_identity = PublicKeyBundle::from_keypairs(
+        alice_kem,
+        alice_signing,
+        alice_ratchet_pub,
+        alice_nym_address,
+    );
 
     // Serialize the FULL bundle (not just the X25519 key) as AEAD additional data.
     // Bob will serialize the received bundle and must get the same bytes.
-    let alice_id_bytes = postcard::to_allocvec(&alice_identity)
-        .map_err(|_| CryptoError::Serialize)?;
+    let alice_id_bytes =
+        postcard::to_allocvec(&alice_identity).map_err(|_| CryptoError::Serialize)?;
 
     // Encrypt initial payload, binding Alice's complete identity as AAD.
     let initial_ct = aead_encrypt(&session_key, initial_plaintext, &alice_id_bytes)?;
@@ -150,8 +154,8 @@ pub fn perform_handshake_bob(
     // Serialize Alice's FULL received identity bundle — this must match Alice's
     // serialization exactly. Any field substituted in transit will produce
     // different bytes and fail either the MAC or AEAD tag check.
-    let alice_id_bytes = postcard::to_allocvec(&msg.alice_identity)
-        .map_err(|_| CryptoError::AeadDecrypt)?;
+    let alice_id_bytes =
+        postcard::to_allocvec(&msg.alice_identity).map_err(|_| CryptoError::AeadDecrypt)?;
     let mlkem_ct_bytes =
         postcard::to_allocvec(&msg.alice_mlkem_ct).map_err(|_| CryptoError::AeadDecrypt)?;
     let mut mac_input = Vec::new();
@@ -198,13 +202,17 @@ mod tests {
 
     /// Build a fresh Bob identity: KEM keypair, signing keypair, ratchet secret,
     /// and a `PublicKeyBundle` with the ratchet public key embedded.
-    fn make_bob() -> (HybridKemKeypair, HybridSigningKeypair, StaticSecret, PublicKeyBundle) {
+    fn make_bob() -> (
+        HybridKemKeypair,
+        HybridSigningKeypair,
+        StaticSecret,
+        PublicKeyBundle,
+    ) {
         let kem = HybridKemKeypair::generate();
         let signing = HybridSigningKeypair::generate();
         let ratchet_secret = StaticSecret::random_from_rng(OsRng);
         let ratchet_pub = X25519PublicKey::from(&ratchet_secret).to_bytes();
-        let bundle =
-            PublicKeyBundle::from_keypairs(&kem, &signing, ratchet_pub, "bob_addr".into());
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, ratchet_pub, "bob_addr".into());
         (kem, signing, ratchet_secret, bundle)
     }
 
@@ -228,7 +236,10 @@ mod tests {
             perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).unwrap();
 
         assert_eq!(alice_sk.0, bob_sk.0, "session keys must match");
-        assert_eq!(plaintext, b"hello bob", "initial plaintext must survive E2EE");
+        assert_eq!(
+            plaintext, b"hello bob",
+            "initial plaintext must survive E2EE"
+        );
     }
 
     #[test]
@@ -248,7 +259,10 @@ mod tests {
         .unwrap();
 
         // Alice's X25519 public key must be in the message
-        assert_eq!(msg.alice_identity.x25519_pub, alice_kem.x25519_public.to_bytes());
+        assert_eq!(
+            msg.alice_identity.x25519_pub,
+            alice_kem.x25519_public.to_bytes()
+        );
         assert_eq!(msg.alice_identity.nym_address, "alice_addr");
     }
 
