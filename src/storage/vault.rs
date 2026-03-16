@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::crypto::primitives::{
     aead_decrypt, aead_encrypt, argon2id_derive, Argon2Params, SymKey,
@@ -60,17 +61,24 @@ impl Default for AppSettings {
 }
 
 /// Decrypted vault payload.
+///
+/// The three identity-secret fields are wrapped in `Zeroizing<Vec<u8>>` so
+/// their bytes are actively overwritten when the vault payload is dropped
+/// (e.g. on app exit or after an incorrect passphrase attempt).
+/// `Zeroizing<T>` serializes identically to `T`, so existing vault files are
+/// fully compatible — no migration required.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct VaultPayload {
     pub nym_address: String,
-    /// Our identity KEM keypair bytes (X25519 secret + ML-KEM DK)
-    pub identity_kem_secret: Vec<u8>,
-    /// Our identity signing keypair bytes
-    pub identity_signing_secret: Vec<u8>,
+    /// Our identity KEM keypair bytes (X25519 secret + ML-KEM DK) — zeroized on drop.
+    pub identity_kem_secret: Zeroizing<Vec<u8>>,
+    /// Our identity signing keypair bytes — zeroized on drop.
+    pub identity_signing_secret: Zeroizing<Vec<u8>>,
     /// Dedicated X25519 ratchet secret (separate from the KEM identity key).
     /// Alice uses the corresponding public key from the contact's `PublicKeyBundle`
     /// as Bob's initial ratchet key; Bob uses this secret for `init_bob()`.
-    pub identity_ratchet_secret: Vec<u8>,
+    /// Zeroized on drop.
+    pub identity_ratchet_secret: Zeroizing<Vec<u8>>,
     pub contacts: Vec<StoredContact>,
     pub conversations: Vec<ConversationMeta>,
     pub settings: AppSettings,

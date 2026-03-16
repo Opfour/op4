@@ -18,6 +18,7 @@ use crate::crypto::hmac_auth::{compute_message_mac, verify_message_mac, MessageM
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
 use crate::crypto::primitives::{aead_decrypt, aead_encrypt, hkdf_expand, MacKey, SymKey};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 use crate::crypto::ratchet::{MessageHeader, RatchetState};
 use crate::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use crate::identity::revocation::{RevocationCertificate, RevocationReason};
@@ -74,10 +75,14 @@ enum SettingsEditMode {
 
 /// A completed handshake from an unknown contact awaiting user acceptance.
 /// Crypto work is already done; we just need the user to assign a name.
+///
+/// Both `plaintext` and `session_key_bytes` are wrapped in `Zeroizing` so
+/// their bytes are overwritten when the entry is accepted, rejected, or evicted
+/// from the queue.
 struct PendingHandshake {
     bundle: PublicKeyBundle,
-    plaintext: Vec<u8>,
-    session_key_bytes: [u8; 32],
+    plaintext: Zeroizing<Vec<u8>>,
+    session_key_bytes: Zeroizing<[u8; 32]>,
 }
 
 /// Tracks an outstanding BundleRequest we sent after scanning a bootstrap QR.
@@ -956,7 +961,7 @@ fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked) {
             }
         }
     };
-    let ratchet = RatchetState::init_bob(pending.session_key_bytes, bob_ratchet_secret);
+    let ratchet = RatchetState::init_bob(*pending.session_key_bytes, bob_ratchet_secret);
     let conv_key = vault.derive_conversation_key(&contact_id);
     if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
         let conv = vault.get_or_create_conversation(contact_id);
@@ -1541,8 +1546,8 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
             }
             app.pending_handshakes.push(PendingHandshake {
                 bundle: hs_msg.alice_identity,
-                plaintext,
-                session_key_bytes: session_key.0,
+                plaintext: Zeroizing::new(plaintext),
+                session_key_bytes: Zeroizing::new(session_key.0),
             });
             let n = app.pending_handshakes.len();
             app.status =
@@ -1994,9 +1999,9 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
     }
 
     // Update vault with new keys and refresh export code.
-    vault.payload.identity_kem_secret = new_kem.to_bytes();
-    vault.payload.identity_signing_secret = new_signing.to_bytes();
-    vault.payload.identity_ratchet_secret = new_ratchet.to_bytes().to_vec();
+    vault.payload.identity_kem_secret = Zeroizing::new(new_kem.to_bytes());
+    vault.payload.identity_signing_secret = Zeroizing::new(new_signing.to_bytes());
+    vault.payload.identity_ratchet_secret = Zeroizing::new(new_ratchet.to_bytes().to_vec());
     vault.save().ok();
     app.export_code = build_export_code(vault);
     app.bootstrap_code = build_bootstrap_code(vault);

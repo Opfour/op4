@@ -217,9 +217,9 @@ fn create_new_vault(vault_path: &std::path::Path) -> Result<VaultUnlocked, AppEr
     let kem_keypair = HybridKemKeypair::generate();
     let signing_keypair = HybridSigningKeypair::generate();
     let ratchet_secret = StaticSecret::random_from_rng(OsRng);
-    vault.payload.identity_kem_secret = kem_keypair.to_bytes();
-    vault.payload.identity_signing_secret = signing_keypair.to_bytes();
-    vault.payload.identity_ratchet_secret = ratchet_secret.to_bytes().to_vec();
+    vault.payload.identity_kem_secret = Zeroizing::new(kem_keypair.to_bytes());
+    vault.payload.identity_signing_secret = Zeroizing::new(signing_keypair.to_bytes());
+    vault.payload.identity_ratchet_secret = Zeroizing::new(ratchet_secret.to_bytes().to_vec());
     vault.save().map_err(AppError::from)?;
 
     eprintln!("Vault created: {}", vault_path.display());

@@ -10,6 +10,10 @@ pub const BLOCK_SIZE: usize = 512;
 /// Maximum message payload: 8 blocks = 4096 bytes.
 pub const MAX_BLOCKS: usize = 8;
 pub const MAX_PAYLOAD: usize = BLOCK_SIZE * MAX_BLOCKS;
+/// Hard cap on inbound wire bytes before the deserializer is invoked.
+/// MAX_PAYLOAD (4096) + 512 bytes of framing/header/MAC overhead.
+/// Any peer sending a larger blob is either buggy or hostile; drop it.
+pub const MAX_WIRE_BYTES: usize = MAX_PAYLOAD + 512;
 
 /// Wire message type tag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,8 +67,13 @@ impl WireMessage {
         postcard::to_allocvec(self).expect("WireMessage serialization cannot fail")
     }
 
-    /// Deserialize from bytes received from Nym SDK.
+    /// Deserialize from bytes received from the transport.
+    /// Returns `None` for oversized payloads (possible DoS probe) before
+    /// invoking the deserializer, and for any malformed postcard data.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() > MAX_WIRE_BYTES {
+            return None;
+        }
         postcard::from_bytes(bytes).ok()
     }
 }
