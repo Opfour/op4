@@ -95,6 +95,7 @@ fn build_filter() -> Result<BpfProgram, String> {
         libc::SYS_brk,
         libc::SYS_mlock,
         libc::SYS_mlockall,
+        libc::SYS_mremap, // allocator resizes large heap mappings on window resize
         libc::SYS_memfd_create,
         // File I/O (vault, Nym key storage)
         libc::SYS_read,
