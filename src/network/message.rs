@@ -18,8 +18,10 @@ pub enum WireMessageType {
     Data,
     Revocation,
     Ack,
-    Loop,  // cover traffic loop message (sent to self)
-    Dummy, // cover traffic filler
+    Loop,          // cover traffic loop message (sent to self)
+    Dummy,         // cover traffic filler
+    BundleRequest, // bootstrap: request our full PublicKeyBundle
+    BundleResponse, // bootstrap: response carrying full PublicKeyBundle
 }
 
 /// The outer wire message sent via Nym.

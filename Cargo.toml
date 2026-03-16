@@ -51,6 +51,9 @@ getrandom        = "0.2.15"
 # explicit and ensures the same resolved version is used throughout.
 hybrid-array     = "0.4"
 
+# QR code generation (bootstrap contact codes)
+qrcode           = "0.14"
+
 # Passphrase strength
 zxcvbn           = "3.1.0"
 

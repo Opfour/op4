@@ -4,6 +4,75 @@ use std::time::Instant;
 use crate::crypto::keys::PublicKeyBundle;
 use crate::error::IdentityError;
 
+// ─── Bootstrap Code ───────────────────────────────────────────────────────────
+
+/// Version prefix that identifies a bootstrap contact code.
+pub const BOOTSTRAP_PREFIX: &str = "op4b1:";
+
+/// Compact contact code (~110 bytes serialised) that fits inside a QR code.
+///
+/// Contains only the transport address, the Ed25519 verifying key (enough to
+/// identify the sender later), and a 16-byte fingerprint prefix derived from
+/// the full `PublicKeyBundle`.  The recipient scans the QR, pastes the code
+/// into op4's *Add contact* prompt, and op4 automatically sends a
+/// `WireMessageType::BundleRequest` to the peer's address.  Once the peer
+/// replies with a `BundleResponse` carrying the full `PublicKeyBundle`, op4
+/// verifies the fingerprint prefix and adds the contact.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BootstrapCode {
+    /// Tor hidden-service address the peer is listening on.
+    pub nym_address: String,
+    /// Ed25519 verifying key — used to match a `BundleResponse` to this request.
+    pub ed25519_vk: [u8; 32],
+    /// First 16 bytes of the SHA-256 fingerprint of the full `PublicKeyBundle`.
+    /// Verified when the bundle is received so the caller cannot be spoofed.
+    pub fingerprint_prefix: [u8; 16],
+}
+
+impl BootstrapCode {
+    /// Build a bootstrap code from an already-constructed `PublicKeyBundle`.
+    pub fn from_bundle(bundle: &PublicKeyBundle) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(bundle.x25519_pub);
+        h.update(&bundle.mlkem_ek);
+        h.update(bundle.ed25519_vk);
+        h.update(&bundle.mldsa_vk);
+        h.update(bundle.ratchet_pub);
+        let digest = h.finalize();
+        let mut fp = [0u8; 16];
+        fp.copy_from_slice(&digest[..16]);
+        Self {
+            nym_address: bundle.nym_address.clone(),
+            ed25519_vk: bundle.ed25519_vk,
+            fingerprint_prefix: fp,
+        }
+    }
+
+    /// Encode to a human-readable, paste-able string prefixed with `op4b1:`.
+    pub fn encode(&self) -> String {
+        let bytes = postcard::to_allocvec(self).expect("BootstrapCode serialisation cannot fail");
+        format!("{}{}", BOOTSTRAP_PREFIX, bs58::encode(bytes).into_string())
+    }
+
+    /// Decode from the string produced by `encode()`.
+    pub fn decode(s: &str) -> Result<Self, IdentityError> {
+        let inner = s
+            .trim()
+            .strip_prefix(BOOTSTRAP_PREFIX)
+            .ok_or(IdentityError::InvalidFormat)?;
+        let bytes = bs58::decode(inner)
+            .into_vec()
+            .map_err(|_| IdentityError::InvalidBase58)?;
+        postcard::from_bytes(&bytes).map_err(|_| IdentityError::InvalidFormat)
+    }
+
+    /// Return `true` when the string looks like a bootstrap code (has the right prefix).
+    pub fn is_bootstrap(s: &str) -> bool {
+        s.trim_start().starts_with(BOOTSTRAP_PREFIX)
+    }
+}
+
 /// A decoded contact code (what users exchange out-of-band).
 /// Base58-encoded `PublicKeyBundle` via postcard serialization.
 pub struct ContactCode(pub PublicKeyBundle);
