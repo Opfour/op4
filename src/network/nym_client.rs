@@ -351,8 +351,15 @@ fn parse_service_id(response: &str) -> Result<String, NetworkError> {
 // ── SOCKS5 ────────────────────────────────────────────────────────────────────
 
 /// Open a TCP connection to `target` (`host:port`) through the Tor SOCKS5
-/// proxy.  Tor resolves `.onion` names internally — they never leave the
-/// Tor network.
+/// proxy with per-peer stream isolation.
+///
+/// Uses SOCKS5 username/password authentication (RFC 1929) with the peer's
+/// onion address as the username. When Tor is configured with `IsolateSOCKSAuth`
+/// (which `scripts/setup-tor.sh` enables), each unique credential gets its own
+/// Tor circuit — messages to different peers travel over independent paths.
+///
+/// Tor accepts username/password auth by default even without `IsolateSOCKSAuth`;
+/// in that case the credentials are validated but circuit separation is not applied.
 async fn socks5_connect(socks_addr: &str, target: &str) -> std::io::Result<TcpStream> {
     let (host, port_str) = target.rsplit_once(':').ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "target must be host:port")
@@ -363,14 +370,35 @@ async fn socks5_connect(socks_addr: &str, target: &str) -> std::io::Result<TcpSt
 
     let mut s = TcpStream::connect(socks_addr).await?;
 
-    // ── Greeting: version=5, 1 method, NO_AUTH ────────────────────────────────
-    s.write_all(&[0x05, 0x01, 0x00]).await?;
+    // ── Greeting: offer USERNAME/PASSWORD (0x02) for stream isolation ─────────
+    s.write_all(&[0x05, 0x01, 0x02]).await?;
     let mut resp = [0u8; 2];
     s.read_exact(&mut resp).await?;
-    if resp[0] != 0x05 || resp[1] != 0x00 {
+    if resp[0] != 0x05 || resp[1] != 0x02 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
-            format!("SOCKS5: auth method rejected ({resp:?})"),
+            format!("SOCKS5: username/password method rejected ({resp:?}). \
+                     Ensure Tor is running and accepts SOCKS5 connections."),
+        ));
+    }
+
+    // ── RFC 1929 sub-negotiation: peer onion address as username ──────────────
+    // Tor uses the (username, password) pair as the isolation key when
+    // IsolateSOCKSAuth is set on the SocksPort. Each unique pair gets its own
+    // circuit, so messages to different peers stay on separate paths.
+    let user = target.as_bytes(); // "abc123…xyz.onion:14101"
+    let user_len = user.len().min(255) as u8;
+    let mut auth_msg = vec![0x01, user_len];   // VER=1, ULEN
+    auth_msg.extend_from_slice(&user[..user_len as usize]);
+    auth_msg.push(0x01); // PLEN = 1
+    auth_msg.push(0x00); // PASSWD = \x00  (Tor accepts any value)
+    s.write_all(&auth_msg).await?;
+    let mut auth_resp = [0u8; 2];
+    s.read_exact(&mut auth_resp).await?;
+    if auth_resp[1] != 0x00 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("SOCKS5: sub-auth rejected ({auth_resp:?})"),
         ));
     }
 
