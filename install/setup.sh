@@ -83,6 +83,34 @@ else
     echo "[info] Tor already available: $(tor --version 2>&1 | head -1)"
 fi
 
+# On Debian/Ubuntu, tor.service is a multi-instance master; the real daemon
+# is tor@default.service. Restarting only tor.service does not recreate the
+# cookie file. Always restart tor@default when it exists.
+tor_restart() {
+    if systemctl cat tor@default.service &>/dev/null 2>&1; then
+        systemctl restart tor@default
+    elif systemctl cat tor.service &>/dev/null 2>&1; then
+        systemctl restart tor
+    else
+        service tor restart
+    fi
+}
+
+tor_start() {
+    if systemctl cat tor@default.service &>/dev/null 2>&1; then
+        systemctl start tor@default
+    elif systemctl cat tor.service &>/dev/null 2>&1; then
+        systemctl start tor
+    else
+        service tor start
+    fi
+}
+
+tor_is_active() {
+    systemctl is-active --quiet tor@default 2>/dev/null || \
+    systemctl is-active --quiet tor 2>/dev/null
+}
+
 # Check Tor control port config
 if ! grep -q "^ControlPort" /etc/tor/torrc 2>/dev/null; then
     echo "[+] Enabling Tor control port..."
@@ -90,33 +118,35 @@ if ! grep -q "^ControlPort" /etc/tor/torrc 2>/dev/null; then
     echo "ControlPort 9051"       >> /etc/tor/torrc
     echo "CookieAuthentication 1" >> /etc/tor/torrc
     echo "[+] Restarting Tor to apply control port config..."
-    if systemctl restart tor 2>/dev/null || service tor restart 2>/dev/null; then
+    if tor_restart; then
         echo "[ok] Tor restarted."
     else
-        echo "[error] Tor failed to restart. Check: sudo journalctl -u tor --no-pager -n 20" >&2
+        echo "[error] Tor failed to restart. Check: sudo journalctl -u tor@default --no-pager -n 20" >&2
         exit 1
     fi
 else
     echo "[info] Tor control port already configured."
-    # Ensure Tor is actually running (it may be stopped or have failed to start)
-    if ! systemctl is-active --quiet tor 2>/dev/null; then
+    if ! tor_is_active; then
         echo "[+] Tor is not running — starting it now..."
-        if systemctl start tor 2>/dev/null || service tor start 2>/dev/null; then
+        if tor_start; then
             echo "[ok] Tor started."
         else
-            echo "[error] Failed to start Tor. Check: sudo journalctl -u tor --no-pager -n 20" >&2
+            echo "[error] Failed to start Tor. Check: sudo journalctl -u tor@default --no-pager -n 20" >&2
             exit 1
         fi
+    else
+        echo "[+] Restarting Tor to ensure cookie file is current..."
+        tor_restart
+        echo "[ok] Tor restarted."
     fi
 fi
 
-# Verify the cookie file exists and is readable (gives early feedback if something is wrong)
+# Verify the cookie file exists (gives early feedback if something is wrong)
 COOKIE_FILE="/run/tor/control.authcookie"
-sleep 2  # give Tor a moment to write the cookie file after (re)start
+sleep 3  # give Tor a moment to write the cookie file after (re)start
 if [[ ! -f "$COOKIE_FILE" ]]; then
     echo "[warn] Tor cookie file not found at $COOKIE_FILE." >&2
-    echo "       Tor may still be bootstrapping. If op4 fails to start, run:" >&2
-    echo "         sudo systemctl restart tor && sleep 3 && op4" >&2
+    echo "       Try: sudo systemctl restart tor@default && sleep 3 && op4" >&2
 else
     echo "[ok] Tor cookie file present."
 fi
