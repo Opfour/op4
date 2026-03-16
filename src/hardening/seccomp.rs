@@ -152,8 +152,9 @@ fn build_filter() -> Result<BpfProgram, String> {
         libc::SYS_recvfrom,
         libc::SYS_sendmsg,
         libc::SYS_recvmsg,
-        libc::SYS_sendmmsg, // batch socket send (Nym SDK / WebSocket)
-        libc::SYS_recvmmsg, // batch socket recv (Nym SDK / WebSocket)
+        libc::SYS_sendmmsg,   // batch socket send (Nym SDK / WebSocket)
+        libc::SYS_recvmmsg,   // batch socket recv (Nym SDK / WebSocket)
+        libc::SYS_socketpair, // Tokio internal thread wake-up pipe
         libc::SYS_setsockopt,
         libc::SYS_getsockopt,
         libc::SYS_getsockname,
