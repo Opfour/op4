@@ -89,10 +89,36 @@ if ! grep -q "^ControlPort" /etc/tor/torrc 2>/dev/null; then
     echo "" >> /etc/tor/torrc
     echo "ControlPort 9051"       >> /etc/tor/torrc
     echo "CookieAuthentication 1" >> /etc/tor/torrc
-    systemctl restart tor 2>/dev/null || service tor restart 2>/dev/null || true
-    echo "[ok] Tor control port enabled (9051, cookie auth)."
+    echo "[+] Restarting Tor to apply control port config..."
+    if systemctl restart tor 2>/dev/null || service tor restart 2>/dev/null; then
+        echo "[ok] Tor restarted."
+    else
+        echo "[error] Tor failed to restart. Check: sudo journalctl -u tor --no-pager -n 20" >&2
+        exit 1
+    fi
 else
     echo "[info] Tor control port already configured."
+    # Ensure Tor is actually running (it may be stopped or have failed to start)
+    if ! systemctl is-active --quiet tor 2>/dev/null; then
+        echo "[+] Tor is not running — starting it now..."
+        if systemctl start tor 2>/dev/null || service tor start 2>/dev/null; then
+            echo "[ok] Tor started."
+        else
+            echo "[error] Failed to start Tor. Check: sudo journalctl -u tor --no-pager -n 20" >&2
+            exit 1
+        fi
+    fi
+fi
+
+# Verify the cookie file exists and is readable (gives early feedback if something is wrong)
+COOKIE_FILE="/run/tor/control.authcookie"
+sleep 2  # give Tor a moment to write the cookie file after (re)start
+if [[ ! -f "$COOKIE_FILE" ]]; then
+    echo "[warn] Tor cookie file not found at $COOKIE_FILE." >&2
+    echo "       Tor may still be bootstrapping. If op4 fails to start, run:" >&2
+    echo "         sudo systemctl restart tor && sleep 3 && op4" >&2
+else
+    echo "[ok] Tor cookie file present."
 fi
 
 # Add the installing user to the debian-tor group so they can read the Tor
