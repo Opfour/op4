@@ -378,3 +378,5 @@ feature-complete status for 0.1.0-dev:
 - **Key revocation wired end-to-end.** `RevocationCertificate` structs are
   signed with the hybrid Ed25519+ML-DSA-65 keypair and sent to all contacts
   as `WireMessageType::Revocation` messages over Tor.
+
+    <img src="docs/github.logo.jpeg" align="left" width="500" />
