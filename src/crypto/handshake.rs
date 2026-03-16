@@ -40,9 +40,9 @@ pub struct HandshakeOutput {
 ///
 /// Key agreement (X3DH hybrid variant):
 /// ```
-/// DH1 = X25519(Alice_IK, Bob_IK)
-/// DH2 = X25519(Alice_EK, Bob_IK)
-/// DH3 = X25519(Alice_EK, Bob_SPK)   [Bob_SPK = Bob_IK for simplicity here]
+/// DH1 = X25519(Alice_IK,  Bob_IK)
+/// DH2 = X25519(Alice_EK,  Bob_IK)
+/// DH3 = X25519(Alice_EK,  Bob_SPK)  [Bob_SPK = Bob.ratchet_pub]
 /// DH4_ss = ML-KEM-Encap(Bob_MLKEM_EK) shared secret
 /// SK = HKDF(DH1 || DH2 || DH3 || DH4_ss, salt=0x00*32, info="op4-x3dh-v1")
 /// ```
@@ -65,8 +65,14 @@ pub fn perform_handshake_alice(
     let dh1 = alice_kem.x25519_secret.diffie_hellman(&bob_ik_pub);
     // DH2: Alice ephemeral key × Bob identity key
     let dh2 = alice_ek_secret.diffie_hellman(&bob_ik_pub);
-    // DH3: Alice ephemeral key × Bob identity key (acting as SPK)
-    let dh3 = alice_ek_secret.diffie_hellman(&bob_ik_pub);
+    // DH3: Alice ephemeral key × Bob signed prekey (Bob's dedicated ratchet pub).
+    // Falls back to Bob's IK for contacts with pre-ratchet_pub bundles.
+    let bob_spk = if bob_bundle.ratchet_pub != [0u8; 32] {
+        X25519PublicKey::from(bob_bundle.ratchet_pub)
+    } else {
+        bob_ik_pub
+    };
+    let dh3 = alice_ek_secret.diffie_hellman(&bob_spk);
 
     // DH4: ML-KEM encapsulation to Bob's ML-KEM public key
     let (mlkem_ct, dh4_ss) = hybrid_kem_encapsulate(bob_bundle, &alice_ek_secret)?;
@@ -108,8 +114,13 @@ pub fn perform_handshake_alice(
 
 /// Respond to a handshake as Bob. Derives the same session key as Alice.
 /// Returns (decrypted_initial_payload, session_key).
+///
+/// `bob_ratchet_secret` must be the dedicated ratchet X25519 secret from the
+/// vault (`identity_ratchet_secret`). It is used for DH3 to match Alice's
+/// `DH3 = X25519(Alice_EK, Bob_SPK)` where Bob_SPK = Bob's ratchet public key.
 pub fn perform_handshake_bob(
     bob_kem: &HybridKemKeypair,
+    bob_ratchet_secret: &StaticSecret,
     msg: &HandshakeInitMessage,
 ) -> Result<(Vec<u8>, SymKey), CryptoError> {
     // Verify Alice's identity bundle is well-formed (key parsing check)
@@ -120,8 +131,10 @@ pub fn perform_handshake_bob(
     let dh1 = bob_kem.x25519_secret.diffie_hellman(&alice_ik_pub);
     // DH2: Bob identity key × Alice ephemeral key
     let dh2 = bob_kem.x25519_secret.diffie_hellman(&alice_ek_pub);
-    // DH3: Bob identity key × Alice ephemeral key (same as DH2 in this simplified version)
-    let dh3 = bob_kem.x25519_secret.diffie_hellman(&alice_ek_pub);
+    // DH3: Bob ratchet key × Alice ephemeral key (reciprocal of Alice's DH3).
+    // Alice computed DH3 = X25519(Alice_EK, Bob_SPK); we compute the same
+    // shared secret from the other side using our ratchet secret.
+    let dh3 = bob_ratchet_secret.diffie_hellman(&alice_ek_pub);
 
     // DH4: ML-KEM decapsulation
     let dh4_ss = hybrid_kem_decapsulate(bob_kem, &alice_ek_pub, &msg.alice_mlkem_ct)?;

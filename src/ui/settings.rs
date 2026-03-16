@@ -15,6 +15,7 @@ pub enum SettingsItem {
     RotateKey,
     RevokeKey,
     ExportContactCode,
+    RefreshCircuit,
 }
 
 pub fn render_settings(
@@ -43,6 +44,7 @@ pub fn render_settings(
         ListItem::new(Line::from("Rotate identity keys")),
         ListItem::new(Line::from("Revoke & announce key change")),
         ListItem::new(Line::from("Export my contact code")),
+        ListItem::new(Line::from("Refresh Tor circuit (SIGNAL NEWNYM)")),
     ];
 
     let list = List::new(items)

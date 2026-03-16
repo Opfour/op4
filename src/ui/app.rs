@@ -89,6 +89,10 @@ struct AppState {
     active_contact_idx: Option<usize>,
     /// Tracks which contact's messages are currently loaded in `messages`.
     loaded_contact_idx: Option<usize>,
+    /// When true, keyboard input goes to `search_query` instead of `draft`.
+    search_active: bool,
+    /// Filter string for message search; empty = show all messages.
+    search_query: String,
     // Settings
     settings_list: ListState,
     settings_edit_mode: SettingsEditMode,
@@ -117,6 +121,8 @@ impl AppState {
             messages: Vec::new(),
             active_contact_idx: None,
             loaded_contact_idx: None,
+            search_active: false,
+            search_query: String::new(),
             settings_list,
             settings_edit_mode: SettingsEditMode::None,
             settings_edit_buf: String::new(),
@@ -161,6 +167,13 @@ pub fn run<B: ratatui::backend::Backend>(
             if let Some(idx) = current_contact {
                 if let Some(contact) = vault.payload.contacts.get(idx) {
                     app.messages = vault.load_messages(&contact.id);
+                    // Clear unread badge when the conversation is opened.
+                    if let Some(conv_idx) = vault.find_conversation_by_contact(&contact.id) {
+                        if vault.payload.conversations[conv_idx].unread_count > 0 {
+                            vault.payload.conversations[conv_idx].unread_count = 0;
+                            vault.save().ok();
+                        }
+                    }
                 } else {
                     app.messages.clear();
                 }
@@ -268,7 +281,7 @@ fn draw(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked) {
         ])
         .split(area);
 
-    draw_tabs(f, app, chunks[0]);
+    draw_tabs(f, app, vault, chunks[0]);
 
     match app.tab {
         Tab::Contacts => draw_contacts(f, app, vault, chunks[1]),
@@ -290,16 +303,27 @@ fn draw(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked) {
     f.render_widget(status, chunks[2]);
 }
 
-fn draw_tabs(f: &mut Frame, app: &AppState, area: Rect) {
+fn draw_tabs(f: &mut Frame, app: &AppState, vault: &VaultUnlocked, area: Rect) {
     let pending = app.pending_handshakes.len();
     let contacts_label = if pending > 0 {
         format!("Contacts [1] ({pending})")
     } else {
         "Contacts [1]".into()
     };
+    let total_unread: u32 = vault
+        .payload
+        .conversations
+        .iter()
+        .map(|c| c.unread_count)
+        .sum();
+    let messages_label = if total_unread > 0 {
+        format!("Messages [2] ({total_unread})")
+    } else {
+        "Messages [2]".into()
+    };
     let titles = vec![
         Line::from(Span::raw(contacts_label)),
-        Line::from(Span::raw("Messages [2]")),
+        Line::from(Span::raw(messages_label)),
         Line::from(Span::raw("Settings [3]")),
     ];
     let idx = match app.tab {
@@ -360,9 +384,21 @@ fn draw_contacts(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked, area:
         .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
 
+    let unread_counts: Vec<u32> = vault
+        .payload
+        .contacts
+        .iter()
+        .map(|c| {
+            vault
+                .find_conversation_by_contact(&c.id)
+                .map(|i| vault.payload.conversations[i].unread_count)
+                .unwrap_or(0)
+        })
+        .collect();
     render_contacts(
         f,
         &vault.payload.contacts,
+        &unread_counts,
         &mut app.contacts_list,
         chunks[0],
     );
@@ -511,7 +547,7 @@ fn draw_conversation(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked, a
         .unwrap_or(0);
 
     if let Some(contact) = vault.payload.contacts.get(idx) {
-        render_conversation(f, &contact.display_name, &app.messages, &app.draft, area);
+        render_conversation(f, &contact.display_name, &app.messages, &app.draft, &app.search_query, area);
     } else {
         let help = Paragraph::new("Select a contact in the Contacts tab.")
             .block(Block::default().borders(Borders::ALL).title("Messages"));
@@ -810,6 +846,42 @@ fn handle_conversation_key(
     vault: &mut VaultUnlocked,
     nym: &mut NymClient,
 ) {
+    // Search mode intercepts all input until the user exits with Esc.
+    if app.search_active {
+        match key.code {
+            KeyCode::Esc => {
+                app.search_active = false;
+                app.search_query.clear();
+                app.status = "Enter:send  Esc:back  Type to compose  /:search".into();
+            }
+            KeyCode::Backspace => {
+                app.search_query.pop();
+                let n = app
+                    .messages
+                    .iter()
+                    .filter(|m| m.content.to_lowercase().contains(&app.search_query.to_lowercase()))
+                    .count();
+                app.status = if app.search_query.is_empty() {
+                    "Search: (type to filter, Esc to clear)".into()
+                } else {
+                    format!("Search: \"{}\"  ({n} match(es))  Esc:clear", app.search_query)
+                };
+            }
+            KeyCode::Char(c) => {
+                app.search_query.push(c);
+                let n = app
+                    .messages
+                    .iter()
+                    .filter(|m| m.content.to_lowercase().contains(&app.search_query.to_lowercase()))
+                    .count();
+                app.status =
+                    format!("Search: \"{}\"  ({n} match(es))  Esc:clear", app.search_query);
+            }
+            _ => {}
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Esc => {
             if app.draft.is_empty() {
@@ -828,6 +900,12 @@ fn handle_conversation_key(
         }
         KeyCode::Backspace => {
             app.draft.pop();
+        }
+        KeyCode::Char('/') => {
+            // Enter search mode.
+            app.search_active = true;
+            app.search_query.clear();
+            app.status = "Search: (type to filter, Esc to clear)".into();
         }
         KeyCode::Char(c) => {
             app.draft.push(c);
@@ -848,7 +926,7 @@ fn handle_settings_key(
     vault: &mut VaultUnlocked,
     nym: &mut NymClient,
 ) {
-    const NUM_SETTINGS: usize = 6;
+    const NUM_SETTINGS: usize = 7;
 
     // Active edit/confirm modes intercept all keys.
     match app.settings_edit_mode.clone() {
@@ -981,6 +1059,12 @@ fn handle_settings_key(
                 app.tab = Tab::Contacts;
                 app.contact_mode = ContactMode::ExportCode;
                 app.status = "Your contact code — press Esc to close.".into();
+            }
+            6 => {
+                // Refresh Tor circuit
+                nym.signal_newnym();
+                app.status =
+                    "SIGNAL NEWNYM sent — new circuits active in ~60 s.".into();
             }
             _ => {}
         },
@@ -1221,8 +1305,17 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
         Err(_) => return,
     };
 
+    // Derive Bob's dedicated ratchet secret (DH3 key) — falls back to KEM
+    // identity key for vaults created before the ratchet_pub field was added.
+    let bob_ratchet_secret = if vault.payload.identity_ratchet_secret.len() == 32 {
+        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        StaticSecret::from(bytes)
+    } else {
+        StaticSecret::from(our_kem.x25519_secret.to_bytes())
+    };
+
     // Complete the handshake as the responder.
-    let (plaintext, session_key) = match perform_handshake_bob(&our_kem, &hs_msg) {
+    let (plaintext, session_key) = match perform_handshake_bob(&our_kem, &bob_ratchet_secret, &hs_msg) {
         Ok(r) => r,
         Err(_) => return, // MAC or decryption failure
     };
