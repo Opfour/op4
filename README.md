@@ -20,10 +20,11 @@ anyone — not even the person you are talking to.
 
 1. [What op4 Does](#what-op4-does)
 2. [Installation](#installation)
-3. [Security Model](#security-model)
-4. [Architecture Overview](#architecture-overview)
-5. [Project Layout](#project-layout)
-6. [Current Status](#current-status)
+3. [Connecting to Another User](#connecting-to-another-user)
+4. [Security Model](#security-model)
+5. [Architecture Overview](#architecture-overview)
+6. [Project Layout](#project-layout)
+7. [Current Status](#current-status)
 
 ---
 
@@ -55,7 +56,7 @@ daemon running on your own machine.
 
 Install all runtime and build dependencies before compiling.
 
-**Rust toolchain** (pinned to 1.88.0 via `rust-toolchain.toml`):
+**Rust toolchain** (pinned to 1.89.0 via `rust-toolchain.toml`):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -158,6 +159,111 @@ stored at `~/.local/share/op4/vault.op4`.
 
 Minimum kernel: **4.15** (5.4+ recommended). Architecture: **x86-64**
 (aarch64 should work but is untested).
+
+---
+
+## Connecting to Another User
+
+Two people each need op4 installed, Tor running, and their vault
+unlocked. The exchange is asymmetric: one person sends their contact
+code first, the other adds it, then sends their first message, which
+arrives as a pending request that the first person accepts.
+
+### Step 1 — First launch
+
+On first run op4 prompts for a **normal passphrase** and a **duress
+passphrase**, then generates your identity keys. This only happens once.
+Your vault is stored at `~/.local/share/op4/vault.op4`.
+
+```
+$ op4
+```
+
+### Step 2 — Get your contact code
+
+Your contact code contains your full public key bundle and your `.onion`
+address. The other person needs this to reach you.
+
+1. Navigate to the **Contacts** tab (press `2` or `→`)
+2. Press **`e`** to export your contact code
+3. Your code appears on screen — it is a long Base58 string starting
+   with `op4:`
+4. Copy it and send it to the other person **out of band** (Signal,
+   email, in person, etc.)
+
+> Your contact code is not secret. It is safe to share publicly.
+> It contains only your public keys and onion address — no private material.
+
+### Step 3 — Add the other person as a contact
+
+Once you have their contact code:
+
+1. In the **Contacts** tab, press **`a`** to add a contact
+2. Paste their `op4:` contact code and press **Enter**
+3. Give them a name and press **Enter**
+
+### Step 4 — Send your first message
+
+1. Select the contact from your contacts list (use `↑`/`↓`, then `Enter`)
+2. Switch to the **Messages** tab (press `3` or `→`)
+3. Type your message and press **Enter**
+
+This first message initiates the encrypted handshake and is delivered
+to their `.onion` address over Tor. They will see it as a **pending
+contact request**.
+
+### Step 5 — Accept an incoming request
+
+When someone sends you a first message, a badge appears on the Contacts
+tab showing how many requests are waiting.
+
+1. Go to the **Contacts** tab (press `2`)
+2. Press **`p`** to review pending requests
+3. You will see the sender's **fingerprint** and their **first message**
+4. Type a name for this contact and press **Enter** to accept
+   (press **`Esc`** to reject and discard)
+
+Once accepted, the Double Ratchet is initialised and the conversation
+is immediately available in the Messages tab.
+
+### Step 6 — Verify the fingerprint (recommended)
+
+Before trusting a contact, confirm their fingerprint matches what they
+show on their own screen. This prevents a man-in-the-middle attack
+during the initial contact exchange.
+
+1. In the **Contacts** tab, select the contact
+2. The fingerprint panel on the right shows a 16-group hex string,
+   e.g. `A3F2:91BC:…`
+3. Ask the other person to read their fingerprint for your entry — it
+   must match exactly
+4. Verification can be done over a voice call, in person, or any other
+   channel where you can confirm their identity
+
+### Navigation reference
+
+| Key | Action |
+|-----|--------|
+| `1` / `←` `→` | Switch tabs (Contacts / Messages / Settings) |
+| `↑` `↓` | Move selection |
+| `Enter` | Open conversation / confirm |
+| `Esc` | Cancel / go back |
+| `e` | Export your contact code (Contacts tab) |
+| `a` | Add a contact (Contacts tab) |
+| `p` | Review pending requests (Contacts tab) |
+| `d` | Delete selected contact (Contacts tab) |
+| `r` | Rotate your keys (Settings tab) |
+| `q` | Quit |
+
+### Key rotation
+
+If you believe your identity keys may be compromised:
+
+1. Go to the **Settings** tab (press `4` or navigate right)
+2. Press **`r`** to rotate keys
+3. op4 generates a new keypair, signs a revocation certificate with
+   your old key, and broadcasts it to all your contacts over Tor
+4. Your contact code changes — share the new one with your contacts
 
 ---
 
@@ -318,7 +424,7 @@ op4/
 │   └── setup.sh                 System installation script
 ├── build.rs                     Embeds source hash at compile time
 ├── deny.toml                    cargo-deny licence + advisory rules
-├── rust-toolchain.toml          Pins Rust 1.88.0
+├── rust-toolchain.toml          Pins Rust 1.89.0
 └── docs/                        This documentation
 ```
 
