@@ -109,3 +109,18 @@ jobs:
 
       - name: Verify builds are identical
         run: diff /tmp/build1.sha256 /tmp/build2.sha256 && echo "✓ Reproducible build verified"
+
+      - name: Verify README release hash is current
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          BINARY_HASH=$(./target/release/op4 --print-hash)
+          EXPECTED_ROW="| \`${VERSION}\` | \`${BINARY_HASH}\` |"
+          if grep -qF "| \`${VERSION}\` | \`${BINARY_HASH}\` |" README.md; then
+            echo "✓ README hash for v${VERSION} matches binary (${BINARY_HASH})"
+          else
+            echo "✗ README hash for v${VERSION} is missing or outdated."
+            echo "  Binary hash : ${BINARY_HASH}"
+            echo "  Run this and commit the result:"
+            echo "    bash scripts/update-release-hash.sh"
+            exit 1
+          fi
