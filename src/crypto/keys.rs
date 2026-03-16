@@ -6,7 +6,7 @@ use ml_kem::{
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
-use zeroize::ZeroizeOnDrop;
+use zeroize::{ZeroizeOnDrop, Zeroizing};
 
 use crate::crypto::primitives::{hkdf_expand, SymKey, AEAD_KEY_LEN};
 use crate::error::CryptoError;
@@ -15,15 +15,28 @@ use crate::error::CryptoError;
 
 /// Combined X25519 + ML-KEM-768 keypair for key exchange.
 /// Both keys are required; breaking either alone is insufficient.
+///
+/// Zeroization notes (ml-kem 0.2.3 does not impl `Zeroize` for `DecapsulationKey`):
+/// - `x25519_secret` — zeroed on drop by StaticSecret's own ZeroizeOnDrop.
+/// - `mlkem_dk` — NOT zeroed on drop (library limitation); mitigated by
+///   `mlkem_dk_raw` which stores the same bytes in a `Zeroizing<Vec<u8>>`
+///   and IS zeroed on drop.
+/// - `mlkem_ek` — public key, contains no secret material; skip zeroize.
 #[derive(ZeroizeOnDrop)]
 pub struct HybridKemKeypair {
     pub x25519_secret: StaticSecret,
     pub x25519_public: X25519PublicKey,
-    // ML-KEM keys are not zeroize-on-drop yet in 0.2.x; wrapped in Box to limit scope
+    /// Parsed decapsulation key — NOT zeroed on drop (ml-kem 0.2.3 limitation).
+    /// Use `mlkem_dk_raw` as the authoritative secret-at-rest; this field is
+    /// reconstructed from those bytes and used only for crypto operations.
     #[zeroize(skip)]
     pub mlkem_dk: Box<DecapsulationKey<MlKem768Params>>,
+    /// Public encapsulation key — no secret material.
     #[zeroize(skip)]
     pub mlkem_ek: Box<EncapsulationKey<MlKem768Params>>,
+    /// Raw 2400-byte decapsulation key bytes in a Zeroizing wrapper.
+    /// Zeroed on drop as a best-effort mitigation for memory forensics.
+    mlkem_dk_raw: Zeroizing<Vec<u8>>,
 }
 
 impl HybridKemKeypair {
@@ -31,11 +44,13 @@ impl HybridKemKeypair {
         let x25519_secret = StaticSecret::random_from_rng(OsRng);
         let x25519_public = X25519PublicKey::from(&x25519_secret);
         let (mlkem_dk, mlkem_ek) = MlKem768::generate(&mut OsRng);
+        let mlkem_dk_raw = Zeroizing::new(mlkem_dk.as_bytes().to_vec());
         Self {
             x25519_secret,
             x25519_public,
             mlkem_dk: Box::new(mlkem_dk),
             mlkem_ek: Box::new(mlkem_ek),
+            mlkem_dk_raw,
         }
     }
 
@@ -63,6 +78,7 @@ impl HybridKemKeypair {
         let x25519_public = X25519PublicKey::from(&x25519_secret);
 
         let dk_bytes: &[u8; 2400] = b[32..2432].try_into().map_err(|_| CryptoError::KeyParse)?;
+        let mlkem_dk_raw = Zeroizing::new(dk_bytes.to_vec());
         let mlkem_dk = DecapsulationKey::<MlKem768Params>::from_bytes(dk_bytes.into());
         let mlkem_ek = Box::new(mlkem_dk.encapsulation_key().clone());
 
@@ -71,6 +87,7 @@ impl HybridKemKeypair {
             x25519_public,
             mlkem_dk: Box::new(mlkem_dk),
             mlkem_ek,
+            mlkem_dk_raw,
         })
     }
 }
@@ -85,15 +102,24 @@ impl HybridKemKeypair {
 /// to generate keys so we can supply entropy from `getrandom` directly and
 /// avoid the rand_core 0.6 vs 0.10 version mismatch that would otherwise occur
 /// when passing `OsRng` to ml-dsa's `CryptoRng`-bounded `key_gen`.
+///
+/// Zeroization notes (ml-dsa 0.1.0-rc.7 does not impl `Zeroize` for `KeyPair`):
+/// - `ed25519_sk` — zeroed on drop by ed25519-dalek's own ZeroizeOnDrop.
+/// - `mldsa_seed` — zeroed on drop (32-byte seed, the true secret).  The
+///   full derived keypair on heap is NOT zeroed; but with the seed wiped
+///   an attacker cannot re-derive the keypair.
+/// - `mldsa_keypair` — NOT zeroed on drop (library limitation).
 #[derive(ZeroizeOnDrop)]
 pub struct HybridSigningKeypair {
     pub ed25519_sk: SigningKey,
     #[zeroize(skip)]
     pub ed25519_vk: VerifyingKey,
+    /// ML-DSA keypair — NOT zeroed on drop (ml-dsa 0.1.0-rc.7 limitation).
+    /// The 32-byte `mldsa_seed` below IS zeroed and is sufficient for re-deriving.
     #[zeroize(skip)]
     pub mldsa_keypair: Box<ml_dsa::KeyPair<ml_dsa::MlDsa65>>,
-    /// ML-DSA 32-byte seed — retained so the keypair can be serialized and
-    /// reconstructed from the vault without storing the full 4 KB secret key.
+    /// ML-DSA 32-byte seed — zeroed on drop.  Used for serialization and
+    /// to reconstruct the keypair from the vault without storing the full 4 KB key.
     mldsa_seed: [u8; 32],
 }
 
