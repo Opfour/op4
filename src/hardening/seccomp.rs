@@ -108,6 +108,22 @@ fn build_filter() -> Result<BpfProgram, String> {
         libc::SYS_getrandom,
         // Terminal / TTY (ratatui + crossterm + raw /dev/tty)
         libc::SYS_ioctl,
+        // File descriptor operations (Tokio O_NONBLOCK / FD_CLOEXEC)
+        libc::SYS_fcntl,
+        libc::SYS_dup,
+        libc::SYS_dup2,
+        libc::SYS_dup3,
+        // Tokio reactor internals (eventfd + pipe wakeups)
+        libc::SYS_eventfd2,
+        libc::SYS_pipe2,
+        // Thread / signal stack (Rust thread panic handler)
+        libc::SYS_sigaltstack,
+        // Memory barrier (crossbeam / Tokio lock-free structures)
+        libc::SYS_membarrier,
+        // glibc 2.35+ registers a restartable-sequence descriptor
+        // in every new thread via rseq(2). Without this, any thread
+        // spawned after seccomp installation is killed immediately.
+        libc::SYS_rseq,
         // Misc (Rust runtime)
         libc::SYS_getrlimit,
         libc::SYS_setrlimit,
