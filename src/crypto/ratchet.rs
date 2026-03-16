@@ -120,7 +120,10 @@ pub struct RatchetState {
 
 impl RatchetState {
     /// Initialize as the session initiator (Alice).
-    pub fn init_alice(root_key: [u8; 32], bob_ratchet_pub: X25519PublicKey) -> Result<Self, CryptoError> {
+    pub fn init_alice(
+        root_key: [u8; 32],
+        bob_ratchet_pub: X25519PublicKey,
+    ) -> Result<Self, CryptoError> {
         let dhs = StaticSecret::random_from_rng(OsRng);
         let dhs_pub = X25519PublicKey::from(&dhs);
         let dh_out = dhs.diffie_hellman(&bob_ratchet_pub);

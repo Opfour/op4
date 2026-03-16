@@ -17,12 +17,9 @@ use crate::crypto::handshake::{
 use crate::crypto::hmac_auth::{compute_message_mac, verify_message_mac, MessageMac};
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
 use crate::crypto::primitives::{aead_decrypt, aead_encrypt, hkdf_expand, MacKey, SymKey};
-use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 use crate::crypto::ratchet::{MessageHeader, RatchetState};
 use crate::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use crate::identity::revocation::{RevocationCertificate, RevocationReason};
-use rand::rngs::OsRng;
 use crate::network::message::{WireMessage, WireMessageType};
 use crate::network::nym_client::NymClient;
 use crate::storage::vault::{StoredMessage, VaultUnlocked};
@@ -34,6 +31,9 @@ use crate::ui::{
     qr::{qr_lines, qr_terminal_height, qr_terminal_width},
     settings::render_settings,
 };
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -269,7 +269,9 @@ fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
     let kem = HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret).ok()?;
     let signing = HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret).ok()?;
     let ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
-        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().ok()?;
+        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32]
+            .try_into()
+            .ok()?;
         x25519_dalek::PublicKey::from(&StaticSecret::from(bytes)).to_bytes()
     } else {
         kem.x25519_public.to_bytes()
@@ -614,7 +616,11 @@ fn draw_settings_edit_popup(f: &mut Frame, app: &AppState, area: Rect) {
                 Line::from(""),
                 Line::from("Enter:save  Esc:cancel"),
             ])
-            .block(Block::default().borders(Borders::ALL).title("Edit Tor SOCKS5 Address"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Edit Tor SOCKS5 Address"),
+            );
             f.render_widget(content, popup);
         }
         SettingsEditMode::EditAutoDelete => {
@@ -643,7 +649,11 @@ fn draw_settings_edit_popup(f: &mut Frame, app: &AppState, area: Rect) {
                  y:confirm  Esc/n:cancel",
             )
             .style(Style::default().fg(Color::Yellow))
-            .block(Block::default().borders(Borders::ALL).title("Confirm Key Rotation"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Confirm Key Rotation"),
+            );
             f.render_widget(content, popup);
         }
         SettingsEditMode::ConfirmRevoke => {
@@ -654,7 +664,11 @@ fn draw_settings_edit_popup(f: &mut Frame, app: &AppState, area: Rect) {
                  y:confirm  Esc/n:cancel",
             )
             .style(Style::default().fg(Color::Red))
-            .block(Block::default().borders(Borders::ALL).title("Confirm Key Revocation"));
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Confirm Key Revocation"),
+            );
             f.render_widget(content, popup);
         }
         SettingsEditMode::None => {}
@@ -675,7 +689,14 @@ fn draw_conversation(f: &mut Frame, app: &mut AppState, vault: &VaultUnlocked, a
         .unwrap_or(0);
 
     if let Some(contact) = vault.payload.contacts.get(idx) {
-        render_conversation(f, &contact.display_name, &app.messages, &app.draft, &app.search_query, area);
+        render_conversation(
+            f,
+            &contact.display_name,
+            &app.messages,
+            &app.draft,
+            &app.search_query,
+            area,
+        );
     } else {
         let help = Paragraph::new("Select a contact in the Contacts tab.")
             .block(Block::default().borders(Borders::ALL).title("Messages"));
@@ -862,8 +883,7 @@ fn handle_contacts_key(
                         Ok(code) => {
                             let seq = vault.payload.sequence;
                             vault.payload.sequence += 1;
-                            let label =
-                                format!("Contact {}", vault.payload.contacts.len() + 1);
+                            let label = format!("Contact {}", vault.payload.contacts.len() + 1);
                             let contact = StoredContact::new(code.0, label, seq);
                             vault.payload.contacts.push(contact);
                             let new_idx = vault.payload.contacts.len() - 1;
@@ -1005,12 +1025,19 @@ fn handle_conversation_key(
                 let n = app
                     .messages
                     .iter()
-                    .filter(|m| m.content.to_lowercase().contains(&app.search_query.to_lowercase()))
+                    .filter(|m| {
+                        m.content
+                            .to_lowercase()
+                            .contains(&app.search_query.to_lowercase())
+                    })
                     .count();
                 app.status = if app.search_query.is_empty() {
                     "Search: (type to filter, Esc to clear)".into()
                 } else {
-                    format!("Search: \"{}\"  ({n} match(es))  Esc:clear", app.search_query)
+                    format!(
+                        "Search: \"{}\"  ({n} match(es))  Esc:clear",
+                        app.search_query
+                    )
                 };
             }
             KeyCode::Char(c) => {
@@ -1018,10 +1045,16 @@ fn handle_conversation_key(
                 let n = app
                     .messages
                     .iter()
-                    .filter(|m| m.content.to_lowercase().contains(&app.search_query.to_lowercase()))
+                    .filter(|m| {
+                        m.content
+                            .to_lowercase()
+                            .contains(&app.search_query.to_lowercase())
+                    })
                     .count();
-                app.status =
-                    format!("Search: \"{}\"  ({n} match(es))  Esc:clear", app.search_query);
+                app.status = format!(
+                    "Search: \"{}\"  ({n} match(es))  Esc:clear",
+                    app.search_query
+                );
             }
             _ => {}
         }
@@ -1209,8 +1242,7 @@ fn handle_settings_key(
             6 => {
                 // Refresh Tor circuit
                 nym.signal_newnym();
-                app.status =
-                    "SIGNAL NEWNYM sent — new circuits active in ~60 s.".into();
+                app.status = "SIGNAL NEWNYM sent — new circuits active in ~60 s.".into();
             }
             _ => {}
         },
@@ -1317,7 +1349,9 @@ fn send_message(
             mac,
         }
         .with_padding();
-        wire_payload = wire.to_bytes().expect("WireMessage serialization cannot fail");
+        wire_payload = wire
+            .to_bytes()
+            .expect("WireMessage serialization cannot fail");
 
         // Persist the advanced ratchet state.
         if let Ok(new_ct) = ratchet.to_encrypted_bytes(&conv_key) {
@@ -1335,7 +1369,9 @@ fn send_message(
             };
 
         let our_ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
-            let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+            let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32]
+                .try_into()
+                .unwrap();
             x25519_dalek::PublicKey::from(&StaticSecret::from(bytes)).to_bytes()
         } else {
             our_kem.x25519_public.to_bytes()
@@ -1390,7 +1426,9 @@ fn send_message(
             ciphertext: hs_bytes,
             mac: MessageMac { tag: [0u8; 32] },
         };
-        wire_payload = wire.to_bytes().expect("WireMessage serialization cannot fail");
+        wire_payload = wire
+            .to_bytes()
+            .expect("WireMessage serialization cannot fail");
     }
 
     // Transmit.
@@ -1482,10 +1520,11 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
     };
 
     // Complete the handshake as the responder.
-    let (plaintext, session_key) = match perform_handshake_bob(&our_kem, &bob_ratchet_secret, &hs_msg) {
-        Ok(r) => r,
-        Err(_) => return, // MAC or decryption failure
-    };
+    let (plaintext, session_key) =
+        match perform_handshake_bob(&our_kem, &bob_ratchet_secret, &hs_msg) {
+            Ok(r) => r,
+            Err(_) => return, // MAC or decryption failure
+        };
 
     // Identify the sender by their Ed25519 verifying key.
     let alice_ed_vk = hs_msg.alice_identity.ed25519_vk;
@@ -1583,7 +1622,13 @@ fn handle_inbound_data(
 
         // Verify deniable HMAC-SHA256. All peers running op4 v0.1+ send a real
         // MAC derived from the ratchet message key. A zeroed tag is not accepted.
-        if !verify_message_mac(&MacKey(mac_key_bytes), &contact_id, header.n, ciphertext, mac) {
+        if !verify_message_mac(
+            &MacKey(mac_key_bytes),
+            &contact_id,
+            header.n,
+            ciphertext,
+            mac,
+        ) {
             app.status = "Message rejected: HMAC authentication failed.".into();
             return;
         }
@@ -1630,11 +1675,7 @@ fn handle_inbound_data(
 ///
 /// An invalid signature or unknown sender is silently dropped — we never
 /// produce an error response that would let an attacker probe our contact list.
-fn handle_inbound_revocation(
-    app: &mut AppState,
-    vault: &mut VaultUnlocked,
-    cert_bytes: &[u8],
-) {
+fn handle_inbound_revocation(app: &mut AppState, vault: &mut VaultUnlocked, cert_bytes: &[u8]) {
     let cert: RevocationCertificate = match postcard::from_bytes(cert_bytes) {
         Ok(c) => c,
         Err(_) => return,
@@ -1718,28 +1759,44 @@ fn send_bundle_request(
     let shared = eph_secret.diffie_hellman(&bob_x25519);
 
     let mut enc_key = [0u8; 32];
-    if hkdf_expand(shared.as_bytes(), Some(eph_pub.as_bytes()), b"op4-bundle-req-v1", &mut enc_key)
-        .is_err()
+    if hkdf_expand(
+        shared.as_bytes(),
+        Some(eph_pub.as_bytes()),
+        b"op4-bundle-req-v1",
+        &mut enc_key,
+    )
+    .is_err()
     {
         return;
     }
 
-    let inner = BundleRequestInner { requester_addr: my_addr, requester_x25519_pub: my_x25519_pub };
+    let inner = BundleRequestInner {
+        requester_addr: my_addr,
+        requester_x25519_pub: my_x25519_pub,
+    };
     let inner_bytes = postcard::to_allocvec(&inner).unwrap_or_default();
     let ct = match aead_encrypt(&SymKey(enc_key), &inner_bytes, eph_pub.as_bytes()) {
         Ok(c) => c,
         Err(_) => return,
     };
 
-    let sealed = SealedBundleRequest { ephemeral_pub: eph_pub.to_bytes(), ciphertext: ct };
+    let sealed = SealedBundleRequest {
+        ephemeral_pub: eph_pub.to_bytes(),
+        ciphertext: ct,
+    };
     let payload = postcard::to_allocvec(&sealed).unwrap_or_default();
     let wire = WireMessage {
         msg_type: WireMessageType::BundleRequest,
-        header: crate::crypto::ratchet::MessageHeader { dh_pub: [0u8; 32], pn: 0, n: 0 },
+        header: crate::crypto::ratchet::MessageHeader {
+            dh_pub: [0u8; 32],
+            pn: 0,
+            n: 0,
+        },
         ciphertext: payload,
         mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
     };
-    nym.send(&bc.nym_address, wire.to_bytes().unwrap_or_default()).ok();
+    nym.send(&bc.nym_address, wire.to_bytes().unwrap_or_default())
+        .ok();
 }
 
 /// Handle an inbound `BundleRequest`: decrypt the sealed request, then reply
@@ -1818,17 +1875,24 @@ fn handle_inbound_bundle_request(
         Err(_) => return,
     };
 
-    let sealed_resp =
-        SealedBundleResponse { ephemeral_pub: resp_eph_pub.to_bytes(), ciphertext: resp_ct };
+    let sealed_resp = SealedBundleResponse {
+        ephemeral_pub: resp_eph_pub.to_bytes(),
+        ciphertext: resp_ct,
+    };
     let resp_payload = postcard::to_allocvec(&sealed_resp).unwrap_or_default();
 
     let wire = WireMessage {
         msg_type: WireMessageType::BundleResponse,
-        header: crate::crypto::ratchet::MessageHeader { dh_pub: [0u8; 32], pn: 0, n: 0 },
+        header: crate::crypto::ratchet::MessageHeader {
+            dh_pub: [0u8; 32],
+            pn: 0,
+            n: 0,
+        },
         ciphertext: resp_payload,
         mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
     };
-    nym.send(&inner.requester_addr, wire.to_bytes().unwrap_or_default()).ok();
+    nym.send(&inner.requester_addr, wire.to_bytes().unwrap_or_default())
+        .ok();
 }
 
 /// Handle an inbound `BundleResponse`: decrypt the sealed response, verify the
@@ -1886,9 +1950,10 @@ fn handle_inbound_bundle_response(
     let digest: [u8; 32] = h.finalize().into();
 
     // Match against a pending request by ed25519_vk AND full 32-byte fingerprint.
-    let pending_idx = app.pending_bundle_requests.iter().position(|p| {
-        p.ed25519_vk == bundle.ed25519_vk && p.fingerprint_prefix == digest
-    });
+    let pending_idx = app
+        .pending_bundle_requests
+        .iter()
+        .position(|p| p.ed25519_vk == bundle.ed25519_vk && p.fingerprint_prefix == digest);
     let pending_idx = match pending_idx {
         Some(i) => i,
         None => return, // unexpected response or fingerprint mismatch — drop
@@ -1916,14 +1981,14 @@ fn handle_inbound_bundle_response(
 /// Generate new identity keypairs, broadcast a revocation cert to all contacts,
 /// and update the vault. The export code is refreshed in `app.export_code`.
 fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient) {
-    let old_signing =
-        match HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret) {
-            Ok(s) => s,
-            Err(_) => {
-                app.status = "Key rotation failed: cannot load current signing key.".into();
-                return;
-            }
-        };
+    let old_signing = match HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret)
+    {
+        Ok(s) => s,
+        Err(_) => {
+            app.status = "Key rotation failed: cannot load current signing key.".into();
+            return;
+        }
+    };
     let old_kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
         Ok(k) => k,
         Err(_) => {
@@ -1934,17 +1999,15 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
 
     // Build old fingerprint (needed for the revocation cert body).
     let old_ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
-        let b: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        let b: [u8; 32] = vault.payload.identity_ratchet_secret[..32]
+            .try_into()
+            .unwrap();
         x25519_dalek::PublicKey::from(&StaticSecret::from(b)).to_bytes()
     } else {
         old_kem.x25519_public.to_bytes()
     };
-    let old_bundle = PublicKeyBundle::from_keypairs(
-        &old_kem,
-        &old_signing,
-        old_ratchet_pub,
-        String::new(),
-    );
+    let old_bundle =
+        PublicKeyBundle::from_keypairs(&old_kem, &old_signing, old_ratchet_pub, String::new());
     let old_fp = old_bundle.fingerprint();
 
     // Generate new keypairs.
@@ -1986,7 +2049,8 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
     let wire_bytes = wire.to_bytes().unwrap_or_default();
     for contact in &vault.payload.contacts {
         if !contact.bundle.nym_address.is_empty() {
-            nym.send(&contact.bundle.nym_address, wire_bytes.clone()).ok();
+            nym.send(&contact.bundle.nym_address, wire_bytes.clone())
+                .ok();
         }
     }
 
@@ -2005,14 +2069,14 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
 /// Broadcast a retirement revocation certificate and mark the key as revoked.
 /// Does NOT generate a new keypair — use `rotate_keys` for that.
 fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient) {
-    let old_signing =
-        match HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret) {
-            Ok(s) => s,
-            Err(_) => {
-                app.status = "Revocation failed: cannot load signing key.".into();
-                return;
-            }
-        };
+    let old_signing = match HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret)
+    {
+        Ok(s) => s,
+        Err(_) => {
+            app.status = "Revocation failed: cannot load signing key.".into();
+            return;
+        }
+    };
     let old_kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
         Ok(k) => k,
         Err(_) => {
@@ -2022,17 +2086,15 @@ fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient
     };
 
     let old_ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
-        let b: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        let b: [u8; 32] = vault.payload.identity_ratchet_secret[..32]
+            .try_into()
+            .unwrap();
         x25519_dalek::PublicKey::from(&StaticSecret::from(b)).to_bytes()
     } else {
         old_kem.x25519_public.to_bytes()
     };
-    let old_bundle = PublicKeyBundle::from_keypairs(
-        &old_kem,
-        &old_signing,
-        old_ratchet_pub,
-        String::new(),
-    );
+    let old_bundle =
+        PublicKeyBundle::from_keypairs(&old_kem, &old_signing, old_ratchet_pub, String::new());
     let old_fp = old_bundle.fingerprint();
 
     let seq = vault.payload.sequence;
@@ -2060,7 +2122,8 @@ fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient
     let wire_bytes = wire.to_bytes().unwrap_or_default();
     for contact in &vault.payload.contacts {
         if !contact.bundle.nym_address.is_empty() {
-            nym.send(&contact.bundle.nym_address, wire_bytes.clone()).ok();
+            nym.send(&contact.bundle.nym_address, wire_bytes.clone())
+                .ok();
         }
     }
     vault.save().ok();
@@ -2079,7 +2142,9 @@ fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient
 /// Returns `None` only if the vault is corrupt (key bytes malformed).
 fn load_ratchet_secret(vault: &VaultUnlocked) -> Option<StaticSecret> {
     if vault.payload.identity_ratchet_secret.len() == 32 {
-        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().ok()?;
+        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32]
+            .try_into()
+            .ok()?;
         Some(StaticSecret::from(bytes))
     } else {
         let kem = HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret).ok()?;

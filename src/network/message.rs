@@ -22,9 +22,9 @@ pub enum WireMessageType {
     Data,
     Revocation,
     Ack,
-    Loop,          // cover traffic loop message (sent to self)
-    Dummy,         // cover traffic filler
-    BundleRequest, // bootstrap: request our full PublicKeyBundle
+    Loop,           // cover traffic loop message (sent to self)
+    Dummy,          // cover traffic filler
+    BundleRequest,  // bootstrap: request our full PublicKeyBundle
     BundleResponse, // bootstrap: response carrying full PublicKeyBundle
 }
 
@@ -109,7 +109,11 @@ mod tests {
     fn make_wire(ciphertext: Vec<u8>) -> WireMessage {
         WireMessage {
             msg_type: WireMessageType::Data,
-            header: MessageHeader { dh_pub: [0u8; 32], pn: 0, n: 0 },
+            header: MessageHeader {
+                dh_pub: [0u8; 32],
+                pn: 0,
+                n: 0,
+            },
             ciphertext,
             mac: MessageMac { tag: [0u8; 32] },
         }

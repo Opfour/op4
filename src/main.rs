@@ -20,14 +20,14 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair};
-use rand::rngs::OsRng;
-use x25519_dalek::StaticSecret;
 use crate::error::{AppError, VaultError};
 use crate::hardening::memory::apply_memory_hardening;
 use crate::hardening::seccomp::install_seccomp_filter;
 use crate::network::nym_client::NymClient;
 use crate::storage::vault::VaultUnlocked;
 use crate::ui::passphrase::{prompt_new_passphrase, prompt_unlock_passphrase};
+use rand::rngs::OsRng;
+use x25519_dalek::StaticSecret;
 use zeroize::Zeroizing;
 
 /// Source hash generated at build time by build.rs over all src/**/*.rs files.

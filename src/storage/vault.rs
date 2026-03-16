@@ -162,11 +162,11 @@ impl VaultUnlocked {
         let duress_result = try_decrypt_section(&data, &duress_key, &header, true);
 
         // Extract both raw (pre-padding) ciphertext sections.
-        let normal_raw = data[header.normal_section_offset
-            ..header.normal_section_offset + header.normal_ct_len]
+        let normal_raw = data
+            [header.normal_section_offset..header.normal_section_offset + header.normal_ct_len]
             .to_vec();
-        let duress_raw = data[header.duress_section_offset
-            ..header.duress_section_offset + header.duress_ct_len]
+        let duress_raw = data
+            [header.duress_section_offset..header.duress_section_offset + header.duress_ct_len]
             .to_vec();
 
         // Evaluate results after both attempts (constant-time).
@@ -382,8 +382,7 @@ fn build_vault_file(
     normal_payload: &VaultPayload,
     duress_ct: Vec<u8>,
 ) -> Result<Vec<u8>, VaultError> {
-    let normal_bytes =
-        postcard::to_allocvec(normal_payload).map_err(|_| VaultError::Corrupt)?;
+    let normal_bytes = postcard::to_allocvec(normal_payload).map_err(|_| VaultError::Corrupt)?;
     let normal_ct = aead_encrypt(normal_key, &normal_bytes, VAULT_MAGIC)?;
 
     let normal_ct_len = normal_ct.len();

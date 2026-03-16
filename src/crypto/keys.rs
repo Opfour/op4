@@ -497,7 +497,11 @@ mod tests {
         let fp = bundle.fingerprint();
         let parts: Vec<&str> = fp.split(':').collect();
         // SHA-256 is 32 bytes; chunks(2) → 16 groups; each formatted as 4 hex chars
-        assert_eq!(parts.len(), 16, "fingerprint must have 16 colon-separated groups");
+        assert_eq!(
+            parts.len(),
+            16,
+            "fingerprint must have 16 colon-separated groups"
+        );
         for part in &parts {
             assert_eq!(part.len(), 4, "each group must be 4 hex chars, got: {part}");
         }

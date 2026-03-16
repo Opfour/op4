@@ -105,7 +105,9 @@ impl NymClient {
         identity_kem_secret: &[u8],
     ) -> Result<Self, NetworkError> {
         // ── 1. Derive (or randomly seed) the hidden-service key ───────────────
-        let hs_ikm: Vec<u8> = if identity_signing_secret.is_empty() || identity_kem_secret.is_empty() {
+        let hs_ikm: Vec<u8> = if identity_signing_secret.is_empty()
+            || identity_kem_secret.is_empty()
+        {
             // First run: keypairs not yet generated.  Use a session-scoped
             // random seed.  The address will change on restart once the real
             // keypairs are stored, but no contacts know our address yet.
@@ -116,9 +118,8 @@ impl NymClient {
         } else {
             // Combine both secrets: HKDF-SHA256(signing||kem, info="op4-hs-ikm-v1") → 32 B.
             // Leaking one key alone is insufficient to re-derive the onion address.
-            let mut combined = Vec::with_capacity(
-                identity_signing_secret.len() + identity_kem_secret.len(),
-            );
+            let mut combined =
+                Vec::with_capacity(identity_signing_secret.len() + identity_kem_secret.len());
             combined.extend_from_slice(identity_signing_secret);
             combined.extend_from_slice(identity_kem_secret);
             let hk = Hkdf::<Sha256>::new(None, &combined);
@@ -396,8 +397,10 @@ async fn socks5_connect(socks_addr: &str, target: &str) -> std::io::Result<TcpSt
     if resp[0] != 0x05 || resp[1] != 0x02 {
         return Err(std::io::Error::new(
             std::io::ErrorKind::ConnectionRefused,
-            format!("SOCKS5: username/password method rejected ({resp:?}). \
-                     Ensure Tor is running and accepts SOCKS5 connections."),
+            format!(
+                "SOCKS5: username/password method rejected ({resp:?}). \
+                     Ensure Tor is running and accepts SOCKS5 connections."
+            ),
         ));
     }
 
@@ -413,7 +416,7 @@ async fn socks5_connect(socks_addr: &str, target: &str) -> std::io::Result<TcpSt
         ));
     }
     let user_len = user.len() as u8;
-    let mut auth_msg = vec![0x01, user_len];   // VER=1, ULEN
+    let mut auth_msg = vec![0x01, user_len]; // VER=1, ULEN
     auth_msg.extend_from_slice(user);
     auth_msg.push(0x01); // PLEN = 1
     auth_msg.push(0x00); // PASSWD = \x00  (Tor accepts any value)
@@ -565,11 +568,7 @@ async fn outbound_loop(mut send_rx: mpsc::Receiver<(String, Vec<u8>)>, socks_add
 /// to rotate the exit circuit. The hidden-service circuit itself is unaffected.
 async fn control_loop(mut control: TcpStream, mut newnym_rx: mpsc::Receiver<()>) {
     while let Some(()) = newnym_rx.recv().await {
-        if control
-            .write_all(b"SIGNAL NEWNYM\r\n")
-            .await
-            .is_ok()
-        {
+        if control.write_all(b"SIGNAL NEWNYM\r\n").await.is_ok() {
             // Drain the response (250 OK or error) to keep the stream in sync.
             read_tor_response(&mut control).await.ok();
             eprintln!("[op4] Tor circuit refresh requested (SIGNAL NEWNYM).");
