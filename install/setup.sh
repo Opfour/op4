@@ -36,7 +36,25 @@ APPARMOR_PROFILE_SRC="./apparmor/op4.profile"
 APPARMOR_PROFILE_DST="/etc/apparmor.d/op4"
 BINARY="./target/release/op4"
 
-# ── 0a. Rust / Cargo ────────────────────────────────────────────────────────────
+# ── 0a. Build dependencies (C toolchain, pkg-config, OpenSSL headers) ──────────
+
+# These are required by cargo build — catch them early with a clear message.
+BUILD_PKGS=()
+command -v cc      &>/dev/null || BUILD_PKGS+=(build-essential)
+command -v pkg-config &>/dev/null || BUILD_PKGS+=(pkg-config)
+dpkg -s libssl-dev &>/dev/null 2>&1     || BUILD_PKGS+=(libssl-dev)
+command -v setcap  &>/dev/null || BUILD_PKGS+=(libcap2-bin)
+
+if [[ ${#BUILD_PKGS[@]} -gt 0 ]]; then
+    echo "[+] Installing build dependencies: ${BUILD_PKGS[*]}"
+    apt-get update -qq
+    apt-get install -y "${BUILD_PKGS[@]}"
+    echo "[ok] Build dependencies installed."
+else
+    echo "[info] Build dependencies already present."
+fi
+
+# ── 0b. Rust / Cargo ─────────────────────────────────────────────────────────
 
 # Source cargo env in case rustup is installed but not yet in PATH
 if [[ -f "$HOME/.cargo/env" ]]; then
@@ -54,7 +72,7 @@ else
     echo "[info] Rust/Cargo already available: $(cargo --version)"
 fi
 
-# ── 0b. Tor ─────────────────────────────────────────────────────────────────────
+# ── 0c. Tor ─────────────────────────────────────────────────────────────────────
 
 if ! command -v tor &>/dev/null; then
     echo "[+] Tor not found. Installing via apt..."
@@ -100,7 +118,7 @@ else
     echo "[warn] Could not determine Tor group or real user — add yourself to the tor group manually."
 fi
 
-# ── 0c. Build release binary ────────────────────────────────────────────────────
+# ── 0d. Build release binary ────────────────────────────────────────────────────
 
 if [[ ! -f "$BINARY" ]]; then
     echo "[+] Building op4 release binary (this takes a few minutes)..."
