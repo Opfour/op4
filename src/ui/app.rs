@@ -1568,16 +1568,9 @@ fn handle_inbound_data(
             Err(_) => continue,
         };
 
-        // Verify deniable MAC unless the sender used zero-fill (pre-MAC peer).
-        if mac.tag != [0u8; 32]
-            && !verify_message_mac(
-                &MacKey(mac_key_bytes),
-                &contact_id,
-                header.n,
-                ciphertext,
-                mac,
-            )
-        {
+        // Verify deniable HMAC-SHA256. All peers running op4 v0.1+ send a real
+        // MAC derived from the ratchet message key. A zeroed tag is not accepted.
+        if !verify_message_mac(&MacKey(mac_key_bytes), &contact_id, header.n, ciphertext, mac) {
             app.status = "Message rejected: HMAC authentication failed.".into();
             return;
         }
