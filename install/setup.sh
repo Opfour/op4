@@ -77,6 +77,29 @@ else
     echo "[info] Tor control port already configured."
 fi
 
+# Add the installing user to the debian-tor group so they can read the Tor
+# cookie file at /run/tor/control.authcookie (required for control port auth).
+# Determine the real user: prefer $SUDO_USER, fall back to logname.
+REAL_USER="${SUDO_USER:-$(logname 2>/dev/null || echo '')}"
+TOR_GROUP=""
+if getent group debian-tor &>/dev/null; then
+    TOR_GROUP="debian-tor"
+elif getent group tor &>/dev/null; then
+    TOR_GROUP="tor"
+fi
+
+if [[ -n "$TOR_GROUP" && -n "$REAL_USER" ]]; then
+    if id -nG "$REAL_USER" | grep -qw "$TOR_GROUP"; then
+        echo "[info] $REAL_USER is already a member of $TOR_GROUP."
+    else
+        echo "[+] Adding $REAL_USER to $TOR_GROUP group (required for Tor cookie auth)..."
+        usermod -aG "$TOR_GROUP" "$REAL_USER"
+        echo "[ok] Added. You must log out and back in for the group to take effect."
+    fi
+else
+    echo "[warn] Could not determine Tor group or real user — add yourself to the tor group manually."
+fi
+
 # ── 0c. Build release binary ────────────────────────────────────────────────────
 
 if [[ ! -f "$BINARY" ]]; then
@@ -164,6 +187,9 @@ echo "  AppArmor:    $APPARMOR_PROFILE_DST"
 echo ""
 echo "Run op4 as a regular user:"
 echo "  $INSTALL_BIN"
+echo ""
+echo "NOTE: If this is a first install, log out and back in before running op4."
+echo "      (Required for the Tor group membership to take effect.)"
 echo ""
 echo "IMPORTANT: Verify the source hash above matches the published release"
 echo "before trusting this binary."
