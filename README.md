@@ -75,6 +75,25 @@ sudo bash install/setup.sh
 Then verify the source hash printed by the script matches the published
 release hash for your version before trusting the binary.
 
+### Release hash verification
+
+When op4 starts it prints a source hash covering all Rust source files,
+`Cargo.toml`, `Cargo.lock`, and `build.rs`. Compare it against the value
+below for the version you installed.
+
+| Version | Source hash |
+|---|---|
+| `0.1.0` | `5c8dcd54e5291679a3ef556be8dca0d884f3f87e9eafe93601d0224fa7af04fa` |
+
+You can also check it without launching the full app:
+
+```bash
+op4 --print-hash
+```
+
+If the hash does not match, do not use the binary — it was either built
+from a different commit or has been tampered with.
+
 ### Fedora / Arch / other distros (manual)
 
 Install dependencies first, then run the script:
