@@ -28,6 +28,7 @@ use crate::hardening::seccomp::install_seccomp_filter;
 use crate::network::nym_client::NymClient;
 use crate::storage::vault::VaultUnlocked;
 use crate::ui::passphrase::{prompt_new_passphrase, prompt_unlock_passphrase};
+use zeroize::Zeroizing;
 
 /// Source hash generated at build time by build.rs over all src/**/*.rs files.
 /// Users can verify this matches the published release hash.
@@ -140,7 +141,7 @@ async fn main() {
 /// Prompt for passphrase and unlock an existing vault. Allows 3 attempts.
 fn unlock_existing_vault(vault_path: &std::path::Path) -> Result<VaultUnlocked, AppError> {
     for attempt in 1u8..=3 {
-        let passphrase = prompt_unlock_passphrase().map_err(AppError::Io)?;
+        let passphrase = Zeroizing::new(prompt_unlock_passphrase().map_err(AppError::Io)?);
 
         match VaultUnlocked::unlock(vault_path, passphrase.as_bytes()) {
             Ok(vault) => return Ok(vault),
@@ -177,14 +178,14 @@ fn create_new_vault(vault_path: &std::path::Path) -> Result<VaultUnlocked, AppEr
 
     // Normal passphrase
     eprintln!("[1/2] Set your NORMAL passphrase:");
-    let normal_pp = prompt_new_passphrase().map_err(AppError::Io)?;
+    let normal_pp = Zeroizing::new(prompt_new_passphrase().map_err(AppError::Io)?);
 
     eprintln!();
 
     // Duress passphrase (must differ from normal)
     eprintln!("[2/2] Set your DURESS passphrase:");
     let duress_pp = loop {
-        let pp = prompt_new_passphrase().map_err(AppError::Io)?;
+        let pp = Zeroizing::new(prompt_new_passphrase().map_err(AppError::Io)?);
         if pp == normal_pp {
             eprintln!("The duress passphrase must differ from the normal passphrase. Try again.");
         } else {

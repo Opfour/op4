@@ -6,27 +6,30 @@ use crate::error::IdentityError;
 
 // ─── Bootstrap Code ───────────────────────────────────────────────────────────
 
-/// Version prefix that identifies a bootstrap contact code.
-pub const BOOTSTRAP_PREFIX: &str = "op4b1:";
+/// Version prefix that identifies a bootstrap contact code (v2: sealed bundle exchange).
+pub const BOOTSTRAP_PREFIX: &str = "op4b2:";
 
-/// Compact contact code (~110 bytes serialised) that fits inside a QR code.
+/// Compact contact code (~145 bytes serialised) that fits inside a QR code.
 ///
-/// Contains only the transport address, the Ed25519 verifying key (enough to
-/// identify the sender later), and a 16-byte fingerprint prefix derived from
-/// the full `PublicKeyBundle`.  The recipient scans the QR, pastes the code
-/// into op4's *Add contact* prompt, and op4 automatically sends a
-/// `WireMessageType::BundleRequest` to the peer's address.  Once the peer
-/// replies with a `BundleResponse` carrying the full `PublicKeyBundle`, op4
-/// verifies the fingerprint prefix and adds the contact.
+/// Contains the transport address, the Ed25519 verifying key, the X25519 public
+/// key (used to seal the `BundleRequest` so Tor relays cannot read the social
+/// graph), and the full 32-byte SHA-256 fingerprint of the `PublicKeyBundle`.
+/// The recipient scans the QR, pastes the code into op4's *Add contact* prompt,
+/// and op4 automatically sends an encrypted `WireMessageType::BundleRequest`.
+/// Once the peer replies with a `BundleResponse`, op4 verifies the fingerprint
+/// and adds the contact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BootstrapCode {
     /// Tor hidden-service address the peer is listening on.
     pub nym_address: String,
     /// Ed25519 verifying key — used to match a `BundleResponse` to this request.
     pub ed25519_vk: [u8; 32],
-    /// First 16 bytes of the SHA-256 fingerprint of the full `PublicKeyBundle`.
+    /// X25519 public key — used by the requester to seal the `BundleRequest`
+    /// via ephemeral ECDH, hiding the requester's identity from Tor relays.
+    pub x25519_pub: [u8; 32],
+    /// Full 32-byte SHA-256 fingerprint of the `PublicKeyBundle`.
     /// Verified when the bundle is received so the caller cannot be spoofed.
-    pub fingerprint_prefix: [u8; 16],
+    pub fingerprint_prefix: [u8; 32],
 }
 
 impl BootstrapCode {
@@ -39,13 +42,12 @@ impl BootstrapCode {
         h.update(bundle.ed25519_vk);
         h.update(&bundle.mldsa_vk);
         h.update(bundle.ratchet_pub);
-        let digest = h.finalize();
-        let mut fp = [0u8; 16];
-        fp.copy_from_slice(&digest[..16]);
+        let digest: [u8; 32] = h.finalize().into();
         Self {
             nym_address: bundle.nym_address.clone(),
             ed25519_vk: bundle.ed25519_vk,
-            fingerprint_prefix: fp,
+            x25519_pub: bundle.x25519_pub,
+            fingerprint_prefix: digest,
         }
     }
 

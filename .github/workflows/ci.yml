@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  SOURCE_DATE_EPOCH: "0"
+
+jobs:
+  # ── Test + Clippy ────────────────────────────────────────────────────────────
+  test:
+    name: Test & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+          components: clippy, rustfmt
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy (all targets, deny warnings)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked
+
+  # ── Security Audit ───────────────────────────────────────────────────────────
+  audit:
+    name: Security Audit (cargo-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-audit
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Dependency Policy ────────────────────────────────────────────────────────
+  deny:
+    name: Dependency Policy (cargo-deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run cargo-deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          log-level: warn
+          command: check
+          arguments: --all-features
+
+  # ── Reproducible Build ───────────────────────────────────────────────────────
+  reproducible-build:
+    name: Reproducible Release Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (pinned)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.85.0"
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build 1 (release, locked, deterministic timestamp)
+        run: SOURCE_DATE_EPOCH=0 cargo build --release --locked
+
+      - name: Record hash of build 1
+        run: sha256sum target/release/op4 | tee /tmp/build1.sha256
+
+      - name: Clean and rebuild (build 2)
+        run: |
+          cargo clean
+          SOURCE_DATE_EPOCH=0 cargo build --release --locked
+
+      - name: Record hash of build 2
+        run: sha256sum target/release/op4 | tee /tmp/build2.sha256
+
+      - name: Verify builds are identical
+        run: diff /tmp/build1.sha256 /tmp/build2.sha256 && echo "✓ Reproducible build verified"
