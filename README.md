@@ -52,31 +52,51 @@ daemon running on your own machine.
 
 ## Installation
 
-### Dependencies
+### Debian / Ubuntu (automated)
 
-Install all runtime and build dependencies before compiling.
+On Debian and Ubuntu, `install/setup.sh` handles everything in one command:
+Rust toolchain, build dependencies, Tor, control port configuration, binary
+compilation, system user, data directory, and AppArmor profile.
+
+```bash
+git clone https://github.com/Opfour/op4.git
+cd op4
+sudo bash install/setup.sh
+```
+
+> **After the script finishes, you must log out and log back in before
+> running op4.** The installer adds your user to the `debian-tor` group
+> so it can read the Tor cookie file. Linux does not apply group changes
+> to already-open sessions — a fresh login is required.
+>
+> Skipping this step will cause op4 to fail at startup with:
+> `Permission denied reading /run/tor/control.authcookie`
+
+Then verify the source hash printed by the script matches the published
+release hash for your version before trusting the binary.
+
+### Fedora / Arch / other distros (manual)
+
+Install dependencies first, then run the script:
 
 **Rust toolchain** (pinned to 1.89.0 via `rust-toolchain.toml`):
 
 ```bash
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-# restart your shell, then the correct toolchain will be selected automatically
+source "$HOME/.cargo/env"
 ```
 
-**Tor** (must be running with control port enabled):
+**Tor and build dependencies:**
 
 ```bash
-# Debian / Ubuntu
-sudo apt install tor
-
 # Fedora
-sudo dnf install tor
+sudo dnf install tor gcc pkg-config openssl-devel
 
 # Arch
-sudo pacman -S tor
+sudo pacman -S tor base-devel pkg-config openssl
 ```
 
-Then add these two lines to `/etc/tor/torrc` and restart Tor:
+**Configure Tor control port** — add to `/etc/tor/torrc`:
 
 ```
 ControlPort 9051
@@ -85,61 +105,37 @@ CookieAuthentication 1
 
 ```bash
 sudo systemctl restart tor
-
-# Give your user access to the Tor cookie file
-sudo usermod -aG debian-tor $USER   # Debian/Ubuntu
-# or
-sudo usermod -aG tor $USER          # Fedora/Arch
-
-# Log out and back in for the group change to take effect
 ```
 
-**Build dependencies** (C linker + system headers required by some crates):
+**Add your user to the Tor group:**
 
 ```bash
-# Debian / Ubuntu
-sudo apt install build-essential pkg-config libssl-dev
-
-# Fedora
-sudo dnf install gcc pkg-config openssl-devel
-
-# Arch
-sudo pacman -S base-devel pkg-config openssl
+sudo usermod -aG tor $USER        # Fedora / Arch
 ```
 
-### Build
+> **You must log out and log back in after this step.** Group membership
+> changes are not applied to active sessions. Until you do, op4 will fail
+> with `Permission denied reading /run/tor/control.authcookie`.
+>
+> To apply the change without a full logout, run:
+> ```bash
+> newgrp tor
+> ```
+
+**Build and install:**
 
 ```bash
 git clone https://github.com/Opfour/op4.git
 cd op4
 cargo build --release
-```
-
-The compiled binary is at `target/release/op4`. You can run it directly
-from there, or use the install script below to place it system-wide.
-
-### System install (optional)
-
-[`install/setup.sh`](install/setup.sh) installs the binary to
-`/usr/local/bin/op4`, creates a dedicated `op4` system user, sets up
-`/var/lib/op4` with correct permissions, and loads the AppArmor profile
-if AppArmor is available on your system.
-
-```bash
 sudo bash install/setup.sh
 ```
-
-> **Note:** The script expects the release binary to already exist at
-> `target/release/op4`. Run `cargo build --release` first.
->
-> After installation, verify the source hash printed by the script
-> matches the published release hash for your version.
 
 ### Run
 
 ```bash
 op4
-# or, without installing:
+# or, without system install:
 ./target/release/op4
 ```
 
