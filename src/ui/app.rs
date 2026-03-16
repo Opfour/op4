@@ -18,7 +18,7 @@ use crate::crypto::hmac_auth::{compute_message_mac, verify_message_mac, MessageM
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
 use crate::crypto::primitives::MacKey;
 use crate::crypto::ratchet::{MessageHeader, RatchetState};
-use crate::identity::profile::{ContactCode, StoredContact};
+use crate::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use crate::identity::revocation::{RevocationCertificate, RevocationReason};
 use rand::rngs::OsRng;
 use crate::network::message::{WireMessage, WireMessageType};
@@ -29,6 +29,7 @@ use crate::ui::{
     conversation::render_conversation,
     duress::render_duress_inbox,
     input::sanitize_for_display,
+    qr::{qr_lines, qr_terminal_height, qr_terminal_width},
     settings::render_settings,
 };
 
@@ -71,6 +72,13 @@ struct PendingHandshake {
     session_key_bytes: [u8; 32],
 }
 
+/// Tracks an outstanding BundleRequest we sent after scanning a bootstrap QR.
+/// When the peer replies, we match on `ed25519_vk` and verify `fingerprint_prefix`.
+struct BootstrapPending {
+    ed25519_vk: [u8; 32],
+    fingerprint_prefix: [u8; 16],
+}
+
 struct AppState {
     running: bool,
     tab: Tab,
@@ -79,10 +87,14 @@ struct AppState {
     contact_mode: ContactMode,
     add_buf: String,
     export_code: String,
+    /// Compact bootstrap code (~170 chars) shown as a QR in the export popup.
+    bootstrap_code: String,
     key_alert: Option<(String, String)>, // (contact_name, new_fingerprint)
     // Pending inbound contact requests
     pending_handshakes: Vec<PendingHandshake>,
     pending_name_buf: String,
+    // Pending outbound bundle requests (bootstrap QR flow)
+    pending_bundle_requests: Vec<BootstrapPending>,
     // Conversation
     draft: String,
     messages: Vec<StoredMessage>,
@@ -102,7 +114,7 @@ struct AppState {
 }
 
 impl AppState {
-    fn new(export_code: String) -> Self {
+    fn new(export_code: String, bootstrap_code: String) -> Self {
         let mut contacts_list = ListState::default();
         contacts_list.select(Some(0));
         let mut settings_list = ListState::default();
@@ -114,9 +126,11 @@ impl AppState {
             contact_mode: ContactMode::List,
             add_buf: String::new(),
             export_code,
+            bootstrap_code,
             key_alert: None,
             pending_handshakes: Vec::new(),
             pending_name_buf: String::new(),
+            pending_bundle_requests: Vec::new(),
             draft: String::new(),
             messages: Vec::new(),
             active_contact_idx: None,
@@ -156,7 +170,8 @@ pub fn run<B: ratatui::backend::Backend>(
     }
 
     let export_code = build_export_code(&vault);
-    let mut app = AppState::new(export_code);
+    let bootstrap_code = build_bootstrap_code(&vault);
+    let mut app = AppState::new(export_code, bootstrap_code);
 
     loop {
         // Reload messages if the active contact changed.
@@ -196,7 +211,7 @@ pub fn run<B: ratatui::backend::Backend>(
 
         // Non-blocking poll for inbound messages.
         while let Some(incoming) = nym.try_recv_msg() {
-            handle_incoming_message(&mut app, &mut vault, &incoming.payload);
+            handle_incoming_message(&mut app, &mut vault, nym, &incoming.payload);
         }
 
         if !app.running {
@@ -208,29 +223,44 @@ pub fn run<B: ratatui::backend::Backend>(
     Ok(())
 }
 
-/// Build the real contact code from vault keypairs, or a descriptive error string.
-fn build_export_code(vault: &VaultUnlocked) -> String {
+/// Reconstruct our full `PublicKeyBundle` from vault key material.
+/// Returns `None` when the vault lacks identity keys (first-run not complete).
+fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
     if vault.payload.identity_kem_secret.is_empty()
         || vault.payload.identity_signing_secret.is_empty()
     {
-        return "[No identity keys — restart op4 to complete first-run setup]".into();
+        return None;
     }
-    let kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
-        Ok(k) => k,
-        Err(_) => return "[Key decode error — vault may be corrupt]".into(),
-    };
-    let signing = match HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret) {
-        Ok(s) => s,
-        Err(_) => return "[Key decode error — vault may be corrupt]".into(),
-    };
+    let kem = HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret).ok()?;
+    let signing = HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret).ok()?;
     let ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
-        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
+        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().ok()?;
         x25519_dalek::PublicKey::from(&StaticSecret::from(bytes)).to_bytes()
     } else {
-        kem.x25519_public.to_bytes() // fallback for vaults without ratchet key
+        kem.x25519_public.to_bytes()
     };
-    let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, ratchet_pub, vault.payload.nym_address.clone());
-    ContactCode(bundle).encode()
+    Some(PublicKeyBundle::from_keypairs(
+        &kem,
+        &signing,
+        ratchet_pub,
+        vault.payload.nym_address.clone(),
+    ))
+}
+
+/// Build the full contact code (base58, ~4400 chars) for manual sharing.
+fn build_export_code(vault: &VaultUnlocked) -> String {
+    match build_our_bundle(vault) {
+        Some(bundle) => ContactCode(bundle).encode(),
+        None => "[No identity keys — restart op4 to complete first-run setup]".into(),
+    }
+}
+
+/// Build the compact bootstrap code (base58, ~170 chars) that fits in a QR code.
+fn build_bootstrap_code(vault: &VaultUnlocked) -> String {
+    match build_our_bundle(vault) {
+        Some(bundle) => BootstrapCode::from_bundle(&bundle).encode(),
+        None => "[No identity keys]".into(),
+    }
 }
 
 /// Duress mode: visually identical TUI showing only decoy content.
@@ -427,22 +457,85 @@ fn draw_add_contact_popup(f: &mut Frame, app: &AppState, area: Rect) {
 }
 
 fn draw_export_code_popup(f: &mut Frame, app: &AppState, area: Rect) {
-    let popup = centered_rect(80, 50, area);
+    // Use nearly the full terminal area so the QR has room.
+    let popup = centered_rect(96, 96, area);
     f.render_widget(Clear, popup);
-    let code_text = format!(
-        "Share this code out-of-band (in person, Signal, etc.).\n\
-         Never share through an unverified channel.\n\n\
-         {}",
-        app.export_code
-    );
-    let block = Paragraph::new(code_text.as_str())
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Your Contact Code"),
-        )
-        .wrap(ratatui::widgets::Wrap { trim: false });
-    f.render_widget(block, popup);
+
+    // Inner area (inside the outer border).
+    let qr_w = qr_terminal_width(&app.bootstrap_code);
+    let qr_h = qr_terminal_height(&app.bootstrap_code);
+
+    // Only show the QR if it fits horizontally and the popup is tall enough.
+    let inner_w = popup.width.saturating_sub(2); // subtract border
+    let inner_h = popup.height.saturating_sub(2);
+    let qr_fits = qr_w > 0 && qr_w <= inner_w && qr_h + 8 <= inner_h;
+
+    if qr_fits {
+        // ── Layout: [outer border] / qr / separator / bootstrap text / full code ──
+
+        // Outer block (title + border only — we render content manually inside).
+        let outer = Block::default()
+            .borders(Borders::ALL)
+            .title(" Your Contact Code (Esc to close) ");
+        let inner = outer.inner(popup);
+        f.render_widget(outer, popup);
+
+        // Split inner area: QR rows | 1 blank | 2 bootstrap text | 1 blank | remaining full code
+        let qr_rows = qr_h;
+        let constraints = vec![
+            Constraint::Length(qr_rows),
+            Constraint::Length(1), // spacer
+            Constraint::Length(3), // bootstrap code label + value
+            Constraint::Length(1), // spacer
+            Constraint::Min(3),    // full code
+        ];
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(inner);
+
+        // QR code — rendered as a sequence of coloured spans.
+        let lines = qr_lines(&app.bootstrap_code);
+        let qr_para = Paragraph::new(ratatui::text::Text::from(lines));
+        f.render_widget(qr_para, chunks[0]);
+
+        // Bootstrap code (short — fits in a QR code, can be scanned or copy-pasted).
+        let bc_text = format!(
+            "Bootstrap code (scan QR or share this text):\n{}",
+            app.bootstrap_code
+        );
+        let bc_para = Paragraph::new(bc_text.as_str())
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(bc_para, chunks[2]);
+
+        // Full contact code (for contacts who cannot use QR / bootstrap flow).
+        let full_text = format!(
+            "Full code (manual sharing — paste into Add Contact):\n{}",
+            app.export_code
+        );
+        let full_para = Paragraph::new(full_text.as_str())
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(full_para, chunks[4]);
+    } else {
+        // ── Fallback: terminal too small for QR — show text codes only. ──────────
+        let code_text = format!(
+            "Share this code out-of-band (in person, Signal, etc.).\n\
+             Never share through an unverified channel.\n\n\
+             Bootstrap code (short, fits in a QR code):\n{}\n\n\
+             Full contact code (manual sharing):\n{}",
+            app.bootstrap_code, app.export_code,
+        );
+        let block = Paragraph::new(code_text.as_str())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Your Contact Code (Esc to close) "),
+            )
+            .wrap(ratatui::widgets::Wrap { trim: false });
+        f.render_widget(block, popup);
+    }
 }
 
 fn draw_pending_request_popup(f: &mut Frame, app: &AppState, area: Rect) {
@@ -576,7 +669,7 @@ fn handle_key(
     }
 
     match app.tab {
-        Tab::Contacts => handle_contacts_key(app, key, vault),
+        Tab::Contacts => handle_contacts_key(app, key, vault, nym),
         Tab::Conversation => handle_conversation_key(app, key, vault, nym),
         Tab::Settings => handle_settings_key(app, key, vault, nym),
     }
@@ -616,6 +709,7 @@ fn handle_contacts_key(
     app: &mut AppState,
     key: crossterm::event::KeyEvent,
     vault: &mut VaultUnlocked,
+    nym: &mut NymClient,
 ) {
     let n = vault.payload.contacts.len();
     let pending_count = app.pending_handshakes.len();
@@ -710,23 +804,45 @@ fn handle_contacts_key(
             KeyCode::Enter => {
                 let code_str = app.add_buf.trim().to_owned();
                 app.add_buf.clear();
-                match ContactCode::decode(&code_str) {
-                    Ok(code) => {
-                        let seq = vault.payload.sequence;
-                        vault.payload.sequence += 1;
-                        let label = format!("Contact {}", vault.payload.contacts.len() + 1);
-                        let contact = StoredContact::new(code.0, label, seq);
-                        vault.payload.contacts.push(contact);
-                        let new_idx = vault.payload.contacts.len() - 1;
-                        app.contacts_list.select(Some(new_idx));
-                        vault.save().ok();
-                        app.contact_mode = ContactMode::List;
-                        app.status =
-                            "Contact added. Press [v] to verify fingerprint out-of-band.".into();
+
+                if BootstrapCode::is_bootstrap(&code_str) {
+                    // ── Bootstrap QR flow: send BundleRequest, await response ────
+                    match BootstrapCode::decode(&code_str) {
+                        Ok(bc) => {
+                            send_bundle_request(app, vault, nym, &bc);
+                            app.contact_mode = ContactMode::List;
+                            app.status =
+                                "Bundle request sent — contact will be added automatically \
+                                 when they respond."
+                                    .into();
+                        }
+                        Err(_) => {
+                            app.contact_mode = ContactMode::List;
+                            app.status = "Invalid bootstrap code — check and try again.".into();
+                        }
                     }
-                    Err(_) => {
-                        app.contact_mode = ContactMode::List;
-                        app.status = "Invalid contact code — check and try again.".into();
+                } else {
+                    // ── Full contact code: add immediately ───────────────────────
+                    match ContactCode::decode(&code_str) {
+                        Ok(code) => {
+                            let seq = vault.payload.sequence;
+                            vault.payload.sequence += 1;
+                            let label =
+                                format!("Contact {}", vault.payload.contacts.len() + 1);
+                            let contact = StoredContact::new(code.0, label, seq);
+                            vault.payload.contacts.push(contact);
+                            let new_idx = vault.payload.contacts.len() - 1;
+                            app.contacts_list.select(Some(new_idx));
+                            vault.save().ok();
+                            app.contact_mode = ContactMode::List;
+                            app.status =
+                                "Contact added. Press [v] to verify fingerprint out-of-band."
+                                    .into();
+                        }
+                        Err(_) => {
+                            app.contact_mode = ContactMode::List;
+                            app.status = "Invalid contact code — check and try again.".into();
+                        }
                     }
                 }
             }
@@ -1267,7 +1383,12 @@ fn send_message(
 // ─── Receive Path ─────────────────────────────────────────────────────────────
 
 /// Dispatch a raw inbound payload received from the Tor transport.
-fn handle_incoming_message(app: &mut AppState, vault: &mut VaultUnlocked, payload: &[u8]) {
+fn handle_incoming_message(
+    app: &mut AppState,
+    vault: &mut VaultUnlocked,
+    nym: &mut NymClient,
+    payload: &[u8],
+) {
     let wire = match WireMessage::from_bytes(payload) {
         Some(w) => w,
         None => return, // unparseable — silently drop
@@ -1283,6 +1404,14 @@ fn handle_incoming_message(app: &mut AppState, vault: &mut VaultUnlocked, payloa
 
         WireMessageType::Data => {
             handle_inbound_data(app, vault, &wire.header, &wire.ciphertext, &wire.mac);
+        }
+
+        WireMessageType::BundleRequest => {
+            handle_inbound_bundle_request(vault, nym, &wire.ciphertext);
+        }
+
+        WireMessageType::BundleResponse => {
+            handle_inbound_bundle_response(app, vault, &wire.ciphertext);
         }
 
         // Ack / Revocation — not yet implemented; silently drop.
@@ -1463,6 +1592,125 @@ fn handle_inbound_data(
     // No ratchet matched — silently drop (cover traffic or unknown sender).
 }
 
+// ─── Bootstrap QR / Bundle-Request Flow ───────────────────────────────────────
+
+/// Send a `BundleRequest` wire message to a peer whose bootstrap code we just scanned.
+/// Stores the pending request so we can verify the response when it arrives.
+fn send_bundle_request(
+    app: &mut AppState,
+    vault: &VaultUnlocked,
+    nym: &mut NymClient,
+    bc: &BootstrapCode,
+) {
+    // Record what fingerprint prefix we expect in the response.
+    app.pending_bundle_requests.push(BootstrapPending {
+        ed25519_vk: bc.ed25519_vk,
+        fingerprint_prefix: bc.fingerprint_prefix,
+    });
+
+    // Payload: our return address so the peer knows where to send the bundle.
+    let my_addr = vault.payload.nym_address.clone();
+    let payload =
+        postcard::to_allocvec(&my_addr).expect("String serialisation cannot fail");
+
+    let wire = WireMessage {
+        msg_type: WireMessageType::BundleRequest,
+        header: crate::crypto::ratchet::MessageHeader {
+            dh_pub: [0u8; 32],
+            pn: 0,
+            n: 0,
+        },
+        ciphertext: payload,
+        mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
+    };
+    nym.send(&bc.nym_address, wire.to_bytes()).ok();
+}
+
+/// Handle an inbound `BundleRequest`: respond with our full `PublicKeyBundle`.
+fn handle_inbound_bundle_request(
+    vault: &VaultUnlocked,
+    nym: &mut NymClient,
+    request_ciphertext: &[u8],
+) {
+    // Decode the requester's return address.
+    let requester_addr: String = match postcard::from_bytes(request_ciphertext) {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    if requester_addr.is_empty() {
+        return;
+    }
+
+    // Build and serialise our full bundle.
+    let bundle = match build_our_bundle(vault) {
+        Some(b) => b,
+        None => return, // keys not yet generated
+    };
+    let bundle_bytes =
+        postcard::to_allocvec(&bundle).expect("PublicKeyBundle serialisation cannot fail");
+
+    let wire = WireMessage {
+        msg_type: WireMessageType::BundleResponse,
+        header: crate::crypto::ratchet::MessageHeader {
+            dh_pub: [0u8; 32],
+            pn: 0,
+            n: 0,
+        },
+        ciphertext: bundle_bytes,
+        mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
+    };
+    nym.send(&requester_addr, wire.to_bytes()).ok();
+}
+
+/// Handle an inbound `BundleResponse`: verify the fingerprint against any
+/// pending bootstrap request, then add the contact automatically.
+fn handle_inbound_bundle_response(
+    app: &mut AppState,
+    vault: &mut VaultUnlocked,
+    ciphertext: &[u8],
+) {
+    // Deserialise the full bundle from the response.
+    let bundle: PublicKeyBundle = match postcard::from_bytes(ciphertext) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+
+    // Compute the SHA-256 fingerprint of the received bundle.
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(bundle.x25519_pub);
+    h.update(&bundle.mlkem_ek);
+    h.update(bundle.ed25519_vk);
+    h.update(&bundle.mldsa_vk);
+    h.update(bundle.ratchet_pub);
+    let digest: [u8; 32] = h.finalize().into();
+
+    // Match against a pending request by ed25519_vk AND fingerprint prefix.
+    let pending_idx = app.pending_bundle_requests.iter().position(|p| {
+        p.ed25519_vk == bundle.ed25519_vk && p.fingerprint_prefix == digest[..16]
+    });
+    let pending_idx = match pending_idx {
+        Some(i) => i,
+        None => return, // unexpected response or fingerprint mismatch — drop
+    };
+    app.pending_bundle_requests.remove(pending_idx);
+
+    // Add the contact with a default name (user can rename later).
+    let seq = vault.payload.sequence;
+    vault.payload.sequence += 1;
+    let label = format!("Contact {}", vault.payload.contacts.len() + 1);
+    let contact = StoredContact::new(bundle, label.clone(), seq);
+    vault.payload.contacts.push(contact);
+    let new_idx = vault.payload.contacts.len() - 1;
+    app.contacts_list.select(Some(new_idx));
+    vault.save().ok();
+
+    app.status = format!(
+        "Contact '{}' added via QR bootstrap. Press [v] to verify fingerprint.",
+        sanitize_for_display(&label)
+    );
+}
+
 // ─── Key Rotation and Revocation ──────────────────────────────────────────────
 
 /// Generate new identity keypairs, broadcast a revocation cert to all contacts,
@@ -1548,6 +1796,7 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
     vault.payload.identity_ratchet_secret = new_ratchet.to_bytes().to_vec();
     vault.save().ok();
     app.export_code = build_export_code(vault);
+    app.bootstrap_code = build_bootstrap_code(vault);
     app.status =
         "Keys rotated. New contact code ready — share it with contacts via [e] or Settings > 6."
             .into();
