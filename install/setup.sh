@@ -125,9 +125,20 @@ fi
 echo "[+] Installing binary to $INSTALL_BIN"
 install -o root -g root -m 0755 "$BINARY" "$INSTALL_BIN"
 
-INSTALLED_HASH=$("$INSTALL_BIN" --print-hash 2>&1 | grep -oP '(?<=source hash: )\S+' || true)
+# Grant CAP_IPC_LOCK so op4 can lock memory pages (mlockall) without root.
+# Without this, mlockall fails with ENOMEM on systems with a low RLIMIT_MEMLOCK.
+if command -v setcap &>/dev/null; then
+    setcap cap_ipc_lock=+ep "$INSTALL_BIN"
+    echo "[ok] CAP_IPC_LOCK granted (memory pages will be locked on startup)."
+else
+    echo "[warn] setcap not found — install libcap2-bin to enable memory locking."
+    echo "       Without it, op4 will warn that key pages may be swappable."
+fi
+
+# --print-hash prints just the raw hash to stdout (no prefix).
+INSTALLED_HASH=$("$INSTALL_BIN" --print-hash 2>/dev/null || true)
 echo "[ok] Binary installed."
-echo "     Source hash in binary: ${INSTALLED_HASH:-[unavailable — check manually]}"
+echo "     Source hash: ${INSTALLED_HASH:-[unavailable — check manually]}"
 echo "     Compare this with the published release hash."
 
 # ── 4. Install AppArmor profile ───────────────────────────────────────────────
