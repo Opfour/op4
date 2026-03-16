@@ -75,10 +75,9 @@ pub struct NymClient {
     pub address: String,
     send_tx: mpsc::Sender<(String, Vec<u8>)>,
     recv_rx: mpsc::UnboundedReceiver<IncomingMessage>,
-    /// Keeps the Tor control connection alive.
-    /// Dropping `NymClient` closes this socket, which causes Tor to
-    /// immediately remove the hidden-service descriptor.
-    _control: TcpStream,
+    /// Sender side of the NEWNYM channel. The background `control_loop` task
+    /// owns the Tor control socket and processes signals from this channel.
+    newnym_tx: mpsc::Sender<()>,
 }
 
 impl NymClient {
@@ -143,17 +142,21 @@ impl NymClient {
         // ── 5. Channels ───────────────────────────────────────────────────────
         let (recv_tx, recv_rx) = mpsc::unbounded_channel::<IncomingMessage>();
         let (send_tx, send_rx) = mpsc::channel::<(String, Vec<u8>)>(64);
+        let (newnym_tx, newnym_rx) = mpsc::channel::<()>(4);
 
         // ── 6. Spawn background tasks ─────────────────────────────────────────
         tokio::spawn(inbound_loop(listener, recv_tx));
         tokio::spawn(outbound_loop(send_rx, tor_socks_addr.to_owned()));
         tokio::spawn(cover_traffic_loop(onion_address.clone(), send_tx.clone()));
+        // The control socket is moved into control_loop, which keeps it alive
+        // (Tor removes the hidden service when the control connection closes).
+        tokio::spawn(control_loop(control, newnym_rx));
 
         Ok(NymClient {
             address: onion_address,
             send_tx,
             recv_rx,
-            _control: control,
+            newnym_tx,
         })
     }
 
@@ -171,6 +174,13 @@ impl NymClient {
     /// Returns `None` if the receive queue is empty.
     pub fn try_recv_msg(&mut self) -> Option<IncomingMessage> {
         self.recv_rx.try_recv().ok()
+    }
+
+    /// Request a new Tor circuit by sending `SIGNAL NEWNYM` to the control
+    /// port. Fire-and-forget: the background `control_loop` processes the
+    /// signal asynchronously. New circuits become active after ~60 seconds.
+    pub fn signal_newnym(&self) {
+        self.newnym_tx.try_send(()).ok();
     }
 }
 
@@ -474,6 +484,27 @@ async fn outbound_loop(mut send_rx: mpsc::Receiver<(String, Vec<u8>)>, socks_add
             }
         });
     }
+}
+
+/// Keep the Tor control connection alive and process NEWNYM requests.
+///
+/// Owns the control `TcpStream` so the hidden service stays registered for
+/// the lifetime of this task. On each received signal, sends `SIGNAL NEWNYM`
+/// to rotate the exit circuit. The hidden-service circuit itself is unaffected.
+async fn control_loop(mut control: TcpStream, mut newnym_rx: mpsc::Receiver<()>) {
+    while let Some(()) = newnym_rx.recv().await {
+        if control
+            .write_all(b"SIGNAL NEWNYM\r\n")
+            .await
+            .is_ok()
+        {
+            // Drain the response (250 OK or error) to keep the stream in sync.
+            read_tor_response(&mut control).await.ok();
+            eprintln!("[op4] Tor circuit refresh requested (SIGNAL NEWNYM).");
+        }
+    }
+    // Channel closed — NymClient dropped; control socket closes here,
+    // which causes Tor to remove the hidden-service descriptor.
 }
 
 /// Send Poisson-distributed dummy messages to self for cover traffic.

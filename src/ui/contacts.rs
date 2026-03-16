@@ -10,15 +10,21 @@ use crate::identity::profile::StoredContact;
 use crate::ui::input::sanitize_for_display;
 
 /// Render the contacts list panel.
+///
+/// `unread_counts` is a parallel slice — one entry per contact — holding the
+/// number of unread messages. Pass an empty slice if counts are unavailable;
+/// any missing entry is treated as zero.
 pub fn render_contacts(
     f: &mut Frame,
     contacts: &[StoredContact],
+    unread_counts: &[u32],
     list_state: &mut ListState,
     area: ratatui::layout::Rect,
 ) {
     let items: Vec<ListItem> = contacts
         .iter()
-        .map(|c| {
+        .enumerate()
+        .map(|(i, c)| {
             let name = sanitize_for_display(&c.display_name);
             let verified_indicator = if c.verified {
                 Span::styled(" ✓", Style::default().fg(Color::Green))
@@ -30,7 +36,18 @@ pub fn render_contacts(
                         .add_modifier(Modifier::BOLD),
                 )
             };
-            ListItem::new(Line::from(vec![Span::raw(name), verified_indicator]))
+            let unread = unread_counts.get(i).copied().unwrap_or(0);
+            let badge = if unread > 0 {
+                Span::styled(
+                    format!(" ({unread})"),
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Span::raw("")
+            };
+            ListItem::new(Line::from(vec![Span::raw(name), verified_indicator, badge]))
         })
         .collect();
 
