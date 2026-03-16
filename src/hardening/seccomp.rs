@@ -12,10 +12,76 @@ use crate::error::HardeningError;
 ///   - Nym SDK init (socket setup, DNS, thread spawn)
 ///   - ratatui terminal setup (ioctl)
 ///
-/// Default action: KillProcess (SIGSYS) for any syscall not in the allowlist.
+/// Default action: Trap (SIGSYS) for any syscall not in the allowlist.
+/// A SIGSYS handler prints the offending syscall number to stderr before exit,
+/// making it easy to identify any remaining missing allowlist entries.
 pub fn install_seccomp_filter() -> Result<(), HardeningError> {
+    install_sigsys_handler();
     let filter = build_filter().map_err(HardeningError::SeccompBuild)?;
     seccompiler::apply_filter(&filter).map_err(|e| HardeningError::SeccompInstall(e.to_string()))
+}
+
+/// Install a SIGSYS signal handler that prints the blocked syscall number.
+///
+/// seccomp Trap delivers SIGSYS with si_syscall set to the blocked syscall
+/// number. The handler writes it to stderr (async-signal-safe path: write(2))
+/// then calls _exit so the message is visible before the process ends.
+fn install_sigsys_handler() {
+    use libc::{SA_SIGINFO, SIGSYS};
+    // SAFETY: standard sigaction registration; handler only calls write/_exit.
+    unsafe {
+        let mut sa: libc::sigaction = std::mem::zeroed();
+        sa.sa_flags = SA_SIGINFO;
+        sa.sa_sigaction = sigsys_handler as libc::sighandler_t;
+        libc::sigaction(SIGSYS, &sa, std::ptr::null_mut());
+    }
+}
+
+/// SIGSYS handler: writes "[seccomp] blocked syscall NNN\n" to stderr.
+/// Must only call async-signal-safe functions.
+extern "C" fn sigsys_handler(
+    _sig: libc::c_int,
+    info: *mut libc::siginfo_t,
+    _ctx: *mut libc::c_void,
+) {
+    // On x86_64 Linux, SIGSYS siginfo_t has si_syscall (i32) at byte offset 24.
+    // This is stable kernel ABI (see sigaction(2) / <sys/siginfo.h>).
+    // SAFETY: info pointer is valid and aligned when delivered by the kernel.
+    #[cfg(target_arch = "x86_64")]
+    let nr = unsafe { ((info as *const u8).add(24) as *const i32).read_unaligned() as u64 };
+    #[cfg(not(target_arch = "x86_64"))]
+    let nr = {
+        let _ = info;
+        u64::MAX
+    };
+
+    let mut buf = [0u8; 64];
+    let prefix = b"[seccomp] blocked syscall ";
+    let mut pos = 0usize;
+    buf[pos..pos + prefix.len()].copy_from_slice(prefix);
+    pos += prefix.len();
+    // Write decimal digits without heap allocation (async-signal-safe).
+    let mut tmp = [0u8; 20];
+    let mut n = nr;
+    let mut len = 0usize;
+    if n == 0 || n == u64::MAX {
+        tmp[0] = b'?';
+        len = 1;
+    } else {
+        while n > 0 {
+            tmp[len] = b'0' + (n % 10) as u8;
+            n /= 10;
+            len += 1;
+        }
+        tmp[..len].reverse();
+    }
+    buf[pos..pos + len].copy_from_slice(&tmp[..len]);
+    pos += len;
+    buf[pos] = b'\n';
+    pos += 1;
+    // SAFETY: write(2) is async-signal-safe.
+    unsafe { libc::write(2, buf.as_ptr() as *const libc::c_void, pos) };
+    unsafe { libc::_exit(159) }; // 128 + SIGSYS(31)
 }
 
 fn build_filter() -> Result<BpfProgram, String> {
@@ -33,6 +99,8 @@ fn build_filter() -> Result<BpfProgram, String> {
         // File I/O (vault, Nym key storage)
         libc::SYS_read,
         libc::SYS_write,
+        libc::SYS_readv,  // scatter-gather read (Tokio I/O)
+        libc::SYS_writev, // scatter-gather write (Tokio I/O, WebSocket frames)
         libc::SYS_pread64,
         libc::SYS_pwrite64,
         libc::SYS_openat,
@@ -84,6 +152,8 @@ fn build_filter() -> Result<BpfProgram, String> {
         libc::SYS_recvfrom,
         libc::SYS_sendmsg,
         libc::SYS_recvmsg,
+        libc::SYS_sendmmsg, // batch socket send (Nym SDK / WebSocket)
+        libc::SYS_recvmmsg, // batch socket recv (Nym SDK / WebSocket)
         libc::SYS_setsockopt,
         libc::SYS_getsockopt,
         libc::SYS_getsockname,
@@ -127,6 +197,8 @@ fn build_filter() -> Result<BpfProgram, String> {
         // Misc (Rust runtime)
         libc::SYS_getrlimit,
         libc::SYS_setrlimit,
+        libc::SYS_prlimit64, // modern resource-limit query; glibc pthread_create
+        // calls this to check RLIMIT_STACK on thread spawn
         libc::SYS_uname,
     ];
 
@@ -135,7 +207,7 @@ fn build_filter() -> Result<BpfProgram, String> {
 
     let filter: SeccompFilter = SeccompFilter::new(
         rules_map,
-        SeccompAction::KillProcess,
+        SeccompAction::Trap,
         SeccompAction::Allow,
         std::env::consts::ARCH
             .try_into()
