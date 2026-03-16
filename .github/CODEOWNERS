@@ -1,0 +1,20 @@
+# CODEOWNERS — https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+#
+# Each line is a file pattern followed by one or more owners.
+# The last matching pattern takes precedence.
+# Owners are notified and their approval is required when a PR touches matching files.
+
+# Default: everything requires owner review
+*                          @Opfour
+
+# Crypto primitives — highest sensitivity
+src/crypto/                @Opfour
+
+# Vault / key storage
+src/storage/               @Opfour
+
+# Network / Tor transport
+src/network/               @Opfour
+
+# Identity, profile, revocation
+src/identity/              @Opfour

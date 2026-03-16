@@ -92,3 +92,87 @@ impl RevocationCertificate {
         bytes
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
+
+    fn make_signing_bundle() -> (HybridSigningKeypair, HybridKemKeypair, PublicKeyBundle) {
+        let signing = HybridSigningKeypair::generate();
+        let kem = HybridKemKeypair::generate();
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, [0u8; 32], "addr".into());
+        (signing, kem, bundle)
+    }
+
+    #[test]
+    fn create_verify_retirement_roundtrip() {
+        let (signing, _, bundle) = make_signing_bundle();
+        let cert = RevocationCertificate::create(
+            &signing,
+            "fingerprint".into(),
+            [1u8; 32],
+            RevocationReason::Retirement,
+            1,
+            None, // retirement: no new bundle
+        );
+        assert!(cert.verify(&bundle).is_ok());
+        assert!(cert.new_bundle.is_none());
+        assert_eq!(cert.version, 1);
+    }
+
+    #[test]
+    fn create_verify_rotation_with_new_bundle() {
+        let (signing, _, bundle) = make_signing_bundle();
+        // Produce a new (replacement) bundle
+        let new_signing = HybridSigningKeypair::generate();
+        let new_kem = HybridKemKeypair::generate();
+        let new_bundle =
+            PublicKeyBundle::from_keypairs(&new_kem, &new_signing, [0u8; 32], "new".into());
+
+        let cert = RevocationCertificate::create(
+            &signing,
+            bundle.fingerprint(),
+            bundle.x25519_pub,
+            RevocationReason::Rotation,
+            42,
+            Some(new_bundle),
+        );
+        assert!(cert.verify(&bundle).is_ok());
+        assert!(cert.new_bundle.is_some());
+        assert_eq!(cert.sequence, 42);
+    }
+
+    #[test]
+    fn verify_wrong_bundle_fails() {
+        let (signing, _, _bundle) = make_signing_bundle();
+        let cert = RevocationCertificate::create(
+            &signing,
+            "fp".into(),
+            [0u8; 32],
+            RevocationReason::Compromised,
+            1,
+            None,
+        );
+        // A different keypair's bundle must not verify
+        let (_, _, other_bundle) = make_signing_bundle();
+        assert!(cert.verify(&other_bundle).is_err());
+    }
+
+    #[test]
+    fn sequence_numbers_preserved() {
+        let (signing, _, bundle) = make_signing_bundle();
+        for seq in [0u64, 1, u64::MAX / 2, u64::MAX] {
+            let cert = RevocationCertificate::create(
+                &signing,
+                "fp".into(),
+                [0u8; 32],
+                RevocationReason::Rotation,
+                seq,
+                None,
+            );
+            assert_eq!(cert.sequence, seq);
+            assert!(cert.verify(&bundle).is_ok());
+        }
+    }
+}

@@ -27,6 +27,8 @@ pub enum CryptoError {
     NoChainKey,
     NoDhrKey,
     TooManySkipped,
+    /// Postcard serialization failure (distinct from AEAD errors).
+    Serialize,
 }
 
 #[derive(Debug)]

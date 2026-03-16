@@ -164,3 +164,126 @@ impl Default for KeyChangeGuard {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
+
+    fn make_bundle() -> PublicKeyBundle {
+        let kem = HybridKemKeypair::generate();
+        let signing = HybridSigningKeypair::generate();
+        PublicKeyBundle::from_keypairs(&kem, &signing, [0u8; 32], "test_addr".into())
+    }
+
+    // ── BootstrapCode ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn bootstrap_code_roundtrip() {
+        let bundle = make_bundle();
+        let code = BootstrapCode::from_bundle(&bundle);
+        let encoded = code.encode();
+        assert!(encoded.starts_with(BOOTSTRAP_PREFIX));
+        let decoded = BootstrapCode::decode(&encoded).unwrap();
+        assert_eq!(decoded.nym_address, code.nym_address);
+        assert_eq!(decoded.ed25519_vk, code.ed25519_vk);
+        assert_eq!(decoded.x25519_pub, code.x25519_pub);
+        assert_eq!(decoded.fingerprint_prefix, code.fingerprint_prefix);
+    }
+
+    #[test]
+    fn bootstrap_code_fingerprint_matches_bundle_sha256() {
+        use sha2::{Digest, Sha256};
+        let bundle = make_bundle();
+        let code = BootstrapCode::from_bundle(&bundle);
+        let mut h = Sha256::new();
+        h.update(bundle.x25519_pub);
+        h.update(&bundle.mlkem_ek);
+        h.update(bundle.ed25519_vk);
+        h.update(&bundle.mldsa_vk);
+        h.update(bundle.ratchet_pub);
+        let expected: [u8; 32] = h.finalize().into();
+        assert_eq!(code.fingerprint_prefix, expected);
+    }
+
+    #[test]
+    fn bootstrap_code_wrong_prefix_fails() {
+        let bundle = make_bundle();
+        let encoded = BootstrapCode::from_bundle(&bundle).encode();
+        // Strip the real prefix and add a wrong one
+        let payload = &encoded[BOOTSTRAP_PREFIX.len()..];
+        let wrong = format!("op4x:{payload}");
+        assert!(BootstrapCode::decode(&wrong).is_err());
+    }
+
+    #[test]
+    fn bootstrap_code_garbage_base58_fails() {
+        let garbled = format!("{BOOTSTRAP_PREFIX}!!!invalid!!!");
+        assert!(BootstrapCode::decode(&garbled).is_err());
+    }
+
+    #[test]
+    fn is_bootstrap_recognises_prefix() {
+        let bundle = make_bundle();
+        let encoded = BootstrapCode::from_bundle(&bundle).encode();
+        assert!(BootstrapCode::is_bootstrap(&encoded));
+        assert!(!BootstrapCode::is_bootstrap("op4x:abc"));
+        assert!(!BootstrapCode::is_bootstrap(""));
+    }
+
+    // ── ContactCode ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn contact_code_roundtrip() {
+        let bundle = make_bundle();
+        let encoded = ContactCode(bundle.clone()).encode();
+        let decoded = ContactCode::decode(&encoded).unwrap();
+        assert_eq!(decoded.0.version, bundle.version);
+        assert_eq!(decoded.0.nym_address, bundle.nym_address);
+        assert_eq!(decoded.0.x25519_pub, bundle.x25519_pub);
+        assert_eq!(decoded.0.ed25519_vk, bundle.ed25519_vk);
+    }
+
+    #[test]
+    fn contact_code_no_prefix() {
+        // ContactCode uses plain base58 with no "op4..." prefix
+        let bundle = make_bundle();
+        let encoded = ContactCode(bundle).encode();
+        assert!(!BootstrapCode::is_bootstrap(&encoded));
+    }
+
+    #[test]
+    fn contact_code_garbage_fails() {
+        // Invalid base58 characters
+        assert!(ContactCode::decode("!!!not-base58!!!").is_err());
+    }
+
+    // ── StoredContact ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn stored_contact_starts_unverified_with_correct_seq() {
+        let bundle = make_bundle();
+        let c = StoredContact::new(bundle, "Alice".into(), 7);
+        assert!(!c.verified, "new contacts must start unverified");
+        assert_eq!(c.added_seq, 7);
+        assert_eq!(c.last_key_seq, 0);
+        assert_eq!(c.display_name, "Alice");
+    }
+
+    #[test]
+    fn stored_contact_id_is_sha256_of_postcard_bundle() {
+        use sha2::{Digest, Sha256};
+        let bundle = make_bundle();
+        let bytes = postcard::to_allocvec(&bundle).unwrap();
+        let expected: [u8; 32] = Sha256::digest(&bytes).into();
+        let c = StoredContact::new(bundle, "Bob".into(), 0);
+        assert_eq!(c.id, expected);
+    }
+
+    #[test]
+    fn stored_contact_ids_differ_for_different_bundles() {
+        let c1 = StoredContact::new(make_bundle(), "A".into(), 0);
+        let c2 = StoredContact::new(make_bundle(), "B".into(), 0);
+        assert_ne!(c1.id, c2.id);
+    }
+}

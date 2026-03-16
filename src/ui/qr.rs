@@ -26,10 +26,7 @@ use ratatui::{
 /// The quiet zone (2 modules each side) is included.  Uses ECL M for a good
 /// balance of size vs. scan reliability.
 pub fn qr_lines(data: &str) -> Vec<Line<'static>> {
-    let code = match qrcode::QrCode::with_error_correction_level(
-        data,
-        qrcode::EcLevel::M,
-    ) {
+    let code = match qrcode::QrCode::with_error_correction_level(data, qrcode::EcLevel::M) {
         Ok(c) => c,
         Err(_) => {
             return vec![Line::from(Span::raw(
@@ -85,19 +82,20 @@ pub fn qr_lines(data: &str) -> Vec<Line<'static>> {
         for col in 0..total {
             let top = get(top_row, col);
             // When total is odd the last half-row has no bottom partner → light.
-            let bot = if bot_row < total { get(bot_row, col) } else { false };
+            let bot = if bot_row < total {
+                get(bot_row, col)
+            } else {
+                false
+            };
 
             let (ch, fg, bg) = match (top, bot) {
-                (true, true)   => ('█', Color::Black, Color::Black),
-                (true, false)  => ('▀', Color::Black, Color::White),
-                (false, true)  => ('▄', Color::Black, Color::White),
+                (true, true) => ('█', Color::Black, Color::Black),
+                (true, false) => ('▀', Color::Black, Color::White),
+                (false, true) => ('▄', Color::Black, Color::White),
                 (false, false) => (' ', Color::White, Color::White),
             };
 
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default().fg(fg).bg(bg),
-            ));
+            spans.push(Span::styled(ch.to_string(), Style::default().fg(fg).bg(bg)));
         }
 
         lines.push(Line::from(spans));

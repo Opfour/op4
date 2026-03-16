@@ -139,6 +139,17 @@ pub fn hmac_sign_raw(key: &[u8; 32], data: &[u8]) -> [u8; MAC_LEN] {
     mac.finalize().into_bytes().into()
 }
 
+/// Constant-time HMAC-SHA256 verification from raw key bytes.
+///
+/// Uses `verify_slice` from the `hmac` crate which delegates to `subtle`'s
+/// constant-time comparison, preventing timing side-channels.
+/// Used in the handshake to check the session-key-bound MAC.
+pub fn hmac_verify_raw(key: &[u8; 32], data: &[u8], tag: &[u8; MAC_LEN]) -> bool {
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    mac.verify_slice(tag.as_ref()).is_ok()
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
