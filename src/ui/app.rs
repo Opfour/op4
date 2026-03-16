@@ -34,6 +34,13 @@ use crate::ui::{
     settings::render_settings,
 };
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+/// Maximum number of inbound handshakes queued for user review.
+/// Each entry requires an ML-KEM decapsulation (expensive); capping prevents
+/// memory exhaustion and CPU amplification from a handshake-flood DoS.
+const MAX_PENDING_HANDSHAKES: usize = 10;
+
 // ─── State Types ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1437,7 +1444,11 @@ fn handle_incoming_message(
             handle_inbound_bundle_response(app, vault, &wire.ciphertext);
         }
 
-        // Ack / Revocation — not yet implemented; silently drop.
+        WireMessageType::Revocation => {
+            handle_inbound_revocation(app, vault, &wire.ciphertext);
+        }
+
+        // Ack — not yet implemented; silently drop.
         _ => {}
     }
 }
@@ -1523,6 +1534,11 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
         }
         None => {
             // Unknown contact — queue as a pending request for the user to review.
+            // Cap the queue to prevent memory exhaustion from a handshake flood.
+            // When full, evict the oldest entry (FIFO) to make room for the new one.
+            if app.pending_handshakes.len() >= MAX_PENDING_HANDSHAKES {
+                app.pending_handshakes.remove(0);
+            }
             app.pending_handshakes.push(PendingHandshake {
                 bundle: hs_msg.alice_identity,
                 plaintext,
@@ -1606,6 +1622,73 @@ fn handle_inbound_data(
         return;
     }
     // No ratchet matched — silently drop (cover traffic or unknown sender).
+}
+
+/// Process an inbound revocation certificate.
+///
+/// Finds the contact by the revoked X25519 key, verifies the hybrid signature
+/// against their *current* (known-good) bundle, then either:
+/// - updates the contact to the new bundle and triggers a key-change alert, or
+/// - removes the contact entirely if no replacement bundle is provided.
+///
+/// An invalid signature or unknown sender is silently dropped — we never
+/// produce an error response that would let an attacker probe our contact list.
+fn handle_inbound_revocation(
+    app: &mut AppState,
+    vault: &mut VaultUnlocked,
+    cert_bytes: &[u8],
+) {
+    let cert: RevocationCertificate = match postcard::from_bytes(cert_bytes) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    // Locate the contact by the revoked key's X25519 public bytes.
+    let contact_idx = vault
+        .payload
+        .contacts
+        .iter()
+        .position(|c| c.bundle.x25519_pub == cert.revoked_x25519_pub);
+    let contact_idx = match contact_idx {
+        Some(i) => i,
+        None => return, // Unknown sender — ignore (no oracle leak).
+    };
+
+    // Verify the Ed25519+ML-DSA hybrid signature against the *known* bundle.
+    // An attacker who does not hold the private signing keys cannot forge this.
+    let known_bundle = vault.payload.contacts[contact_idx].bundle.clone();
+    if cert.verify(&known_bundle).is_err() {
+        return; // Bad signature — drop silently.
+    }
+
+    let contact_name = vault.payload.contacts[contact_idx].display_name.clone();
+
+    match cert.new_bundle {
+        Some(new_bundle) => {
+            // Key rotation: install the new bundle, clear verification status,
+            // and raise a key-change alert so the user knows to re-verify OOB.
+            let new_fingerprint = new_bundle.fingerprint();
+            vault.payload.contacts[contact_idx].bundle = new_bundle;
+            vault.payload.contacts[contact_idx].verified = false;
+            vault.payload.contacts[contact_idx].last_key_seq += 1;
+            app.key_alert = Some((contact_name.clone(), new_fingerprint));
+            app.contact_mode = ContactMode::KeyAlert;
+            app.tab = Tab::Contacts;
+            app.status = format!(
+                "⚠ {contact_name} has rotated their key — re-verify fingerprint out-of-band."
+            );
+        }
+        None => {
+            // Retirement or compromise with no successor key: remove the contact.
+            vault.payload.contacts.remove(contact_idx);
+            app.status = format!(
+                "Contact '{contact_name}' has revoked their key with no replacement. \
+                 They have been removed from your contact list."
+            );
+        }
+    }
+
+    vault.save().ok();
 }
 
 // ─── Bootstrap QR / Bundle-Request Flow ───────────────────────────────────────

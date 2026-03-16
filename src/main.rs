@@ -36,6 +36,15 @@ const SOURCE_HASH: &str = env!("OP4_SOURCE_HASH");
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
+    // ── 0. Non-interactive flags ──────────────────────────────────────────
+    // Handle before memory hardening / vault setup so the installer script
+    // can extract the embedded source hash without a full Tor connection.
+    //   install/setup.sh uses: op4 --print-hash
+    if std::env::args().any(|a| a == "--print-hash") {
+        println!("{SOURCE_HASH}");
+        return;
+    }
+
     // ── 1. Memory hardening ───────────────────────────────────────────────
     // Must be first — before any sensitive allocations.
     // Disables ptrace, zeroes RLIMIT_CORE, locks pages with mlockall.
