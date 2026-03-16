@@ -383,3 +383,134 @@ pub fn hybrid_kem_decapsulate(
 
     Ok(SymKey(combined))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+
+    // ── HybridKemKeypair ─────────────────────────────────────────────────────
+
+    #[test]
+    fn kem_keypair_to_from_bytes_roundtrip() {
+        let kp = HybridKemKeypair::generate();
+        let bytes = kp.to_bytes();
+        assert_eq!(bytes.len(), 2432, "X25519(32) + ML-KEM DK(2400)");
+        let kp2 = HybridKemKeypair::from_bytes(&bytes).unwrap();
+        assert_eq!(kp.x25519_public.to_bytes(), kp2.x25519_public.to_bytes());
+        assert_eq!(kp.mlkem_ek_bytes(), kp2.mlkem_ek_bytes());
+    }
+
+    #[test]
+    fn kem_keypair_wrong_length_errors() {
+        assert!(HybridKemKeypair::from_bytes(&[0u8; 0]).is_err());
+        assert!(HybridKemKeypair::from_bytes(&[0u8; 100]).is_err());
+        assert!(HybridKemKeypair::from_bytes(&[0u8; 2431]).is_err());
+        assert!(HybridKemKeypair::from_bytes(&[0u8; 2433]).is_err());
+    }
+
+    // ── HybridSigningKeypair ──────────────────────────────────────────────────
+
+    #[test]
+    fn signing_keypair_to_from_bytes_roundtrip() {
+        let kp = HybridSigningKeypair::generate();
+        let bytes = kp.to_bytes();
+        assert_eq!(bytes.len(), 64, "Ed25519 sk(32) + ML-DSA seed(32)");
+        let kp2 = HybridSigningKeypair::from_bytes(&bytes).unwrap();
+        assert_eq!(kp.ed25519_vk.to_bytes(), kp2.ed25519_vk.to_bytes());
+        assert_eq!(kp.mldsa_seed, kp2.mldsa_seed);
+    }
+
+    #[test]
+    fn signing_keypair_wrong_length_errors() {
+        assert!(HybridSigningKeypair::from_bytes(&[0u8; 0]).is_err());
+        assert!(HybridSigningKeypair::from_bytes(&[0u8; 32]).is_err());
+        assert!(HybridSigningKeypair::from_bytes(&[0u8; 63]).is_err());
+        assert!(HybridSigningKeypair::from_bytes(&[0u8; 65]).is_err());
+    }
+
+    // ── hybrid_sign / hybrid_verify ───────────────────────────────────────────
+
+    #[test]
+    fn sign_verify_roundtrip() {
+        let kp = HybridSigningKeypair::generate();
+        let kem = HybridKemKeypair::generate();
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &kp, [0u8; 32], String::new());
+        let sig = hybrid_sign(&kp, b"test message");
+        assert!(hybrid_verify(&bundle, b"test message", &sig).is_ok());
+    }
+
+    #[test]
+    fn sign_verify_tampered_message_fails() {
+        let kp = HybridSigningKeypair::generate();
+        let kem = HybridKemKeypair::generate();
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &kp, [0u8; 32], String::new());
+        let sig = hybrid_sign(&kp, b"original");
+        assert!(hybrid_verify(&bundle, b"tampered", &sig).is_err());
+    }
+
+    #[test]
+    fn sign_verify_wrong_bundle_fails() {
+        let kp = HybridSigningKeypair::generate();
+        let sig = hybrid_sign(&kp, b"message");
+        // Verify against a different keypair's bundle
+        let other_kp = HybridSigningKeypair::generate();
+        let other_kem = HybridKemKeypair::generate();
+        let other_bundle =
+            PublicKeyBundle::from_keypairs(&other_kem, &other_kp, [0u8; 32], String::new());
+        assert!(hybrid_verify(&other_bundle, b"message", &sig).is_err());
+    }
+
+    // ── hybrid_kem_encapsulate / decapsulate ──────────────────────────────────
+
+    #[test]
+    fn kem_encap_decap_shared_secret_matches() {
+        let bob_kem = HybridKemKeypair::generate();
+        let bob_signing = HybridSigningKeypair::generate();
+        let bob_bundle =
+            PublicKeyBundle::from_keypairs(&bob_kem, &bob_signing, [0u8; 32], String::new());
+
+        let alice_ephemeral = StaticSecret::random_from_rng(OsRng);
+        let alice_ek_pub = X25519PublicKey::from(&alice_ephemeral);
+
+        let (ct, alice_ss) = hybrid_kem_encapsulate(&bob_bundle, &alice_ephemeral).unwrap();
+        let bob_ss = hybrid_kem_decapsulate(&bob_kem, &alice_ek_pub, &ct).unwrap();
+
+        assert_eq!(alice_ss.0, bob_ss.0, "shared secrets must match");
+    }
+
+    // ── PublicKeyBundle::fingerprint ──────────────────────────────────────────
+
+    #[test]
+    fn fingerprint_is_deterministic() {
+        let kem = HybridKemKeypair::generate();
+        let signing = HybridSigningKeypair::generate();
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, [0u8; 32], "addr".into());
+        assert_eq!(bundle.fingerprint(), bundle.fingerprint());
+    }
+
+    #[test]
+    fn fingerprint_format_sixteen_colon_separated_groups() {
+        let kem = HybridKemKeypair::generate();
+        let signing = HybridSigningKeypair::generate();
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, [0u8; 32], String::new());
+        let fp = bundle.fingerprint();
+        let parts: Vec<&str> = fp.split(':').collect();
+        // SHA-256 is 32 bytes; chunks(2) → 16 groups; each formatted as 4 hex chars
+        assert_eq!(parts.len(), 16, "fingerprint must have 16 colon-separated groups");
+        for part in &parts {
+            assert_eq!(part.len(), 4, "each group must be 4 hex chars, got: {part}");
+        }
+    }
+
+    #[test]
+    fn fingerprint_changes_with_different_keys() {
+        let kem1 = HybridKemKeypair::generate();
+        let signing1 = HybridSigningKeypair::generate();
+        let kem2 = HybridKemKeypair::generate();
+        let signing2 = HybridSigningKeypair::generate();
+        let b1 = PublicKeyBundle::from_keypairs(&kem1, &signing1, [0u8; 32], String::new());
+        let b2 = PublicKeyBundle::from_keypairs(&kem2, &signing2, [0u8; 32], String::new());
+        assert_ne!(b1.fingerprint(), b2.fingerprint());
+    }
+}

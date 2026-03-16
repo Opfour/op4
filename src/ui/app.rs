@@ -949,16 +949,11 @@ fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked) {
     app.contacts_list.select(Some(new_idx));
 
     // Initialise Bob's ratchet using the dedicated ratchet secret (or KEM fallback).
-    let bob_ratchet_secret = if vault.payload.identity_ratchet_secret.len() == 32 {
-        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
-        StaticSecret::from(bytes)
-    } else {
-        match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
-            Ok(our_kem) => StaticSecret::from(our_kem.x25519_secret.to_bytes()),
-            Err(_) => {
-                app.status = "Key error — vault may be corrupt.".into();
-                return;
-            }
+    let bob_ratchet_secret = match load_ratchet_secret(vault) {
+        Some(s) => s,
+        None => {
+            app.status = "Key error — vault may be corrupt.".into();
+            return;
         }
     };
     let ratchet = RatchetState::init_bob(*pending.session_key_bytes, bob_ratchet_secret);
@@ -1322,7 +1317,7 @@ fn send_message(
             mac,
         }
         .with_padding();
-        wire_payload = wire.to_bytes();
+        wire_payload = wire.to_bytes().expect("WireMessage serialization cannot fail");
 
         // Persist the advanced ratchet state.
         if let Ok(new_ct) = ratchet.to_encrypted_bytes(&conv_key) {
@@ -1368,7 +1363,13 @@ fn send_message(
         } else {
             X25519PublicKey::from(contact.bundle.x25519_pub)
         };
-        let ratchet = RatchetState::init_alice(session_key.0, bob_ratchet_pub);
+        let ratchet = match RatchetState::init_alice(session_key.0, bob_ratchet_pub) {
+            Ok(r) => r,
+            Err(_) => {
+                app.status = "Ratchet init failed — contact may be corrupt.".into();
+                return;
+            }
+        };
 
         // Persist ratchet state.
         if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
@@ -1389,7 +1390,7 @@ fn send_message(
             ciphertext: hs_bytes,
             mac: MessageMac { tag: [0u8; 32] },
         };
-        wire_payload = wire.to_bytes();
+        wire_payload = wire.to_bytes().expect("WireMessage serialization cannot fail");
     }
 
     // Transmit.
@@ -1475,11 +1476,9 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
 
     // Derive Bob's dedicated ratchet secret (DH3 key) — falls back to KEM
     // identity key for vaults created before the ratchet_pub field was added.
-    let bob_ratchet_secret = if vault.payload.identity_ratchet_secret.len() == 32 {
-        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
-        StaticSecret::from(bytes)
-    } else {
-        StaticSecret::from(our_kem.x25519_secret.to_bytes())
+    let bob_ratchet_secret = match load_ratchet_secret(vault) {
+        Some(s) => s,
+        None => return,
     };
 
     // Complete the handshake as the responder.
@@ -1500,13 +1499,6 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
         Some(idx) => {
             // Known contact — set up ratchet and display message immediately.
             let contact_id = vault.payload.contacts[idx].id;
-            let bob_ratchet_secret = if vault.payload.identity_ratchet_secret.len() == 32 {
-                let bytes: [u8; 32] =
-                    vault.payload.identity_ratchet_secret[..32].try_into().unwrap();
-                StaticSecret::from(bytes)
-            } else {
-                StaticSecret::from(our_kem.x25519_secret.to_bytes())
-            };
             let ratchet = RatchetState::init_bob(session_key.0, bob_ratchet_secret);
             let conv_key = vault.derive_conversation_key(&contact_id);
             if let Ok(ratchet_ct) = ratchet.to_encrypted_bytes(&conv_key) {
@@ -1747,7 +1739,7 @@ fn send_bundle_request(
         ciphertext: payload,
         mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
     };
-    nym.send(&bc.nym_address, wire.to_bytes()).ok();
+    nym.send(&bc.nym_address, wire.to_bytes().unwrap_or_default()).ok();
 }
 
 /// Handle an inbound `BundleRequest`: decrypt the sealed request, then reply
@@ -1836,7 +1828,7 @@ fn handle_inbound_bundle_request(
         ciphertext: resp_payload,
         mac: crate::crypto::hmac_auth::MessageMac { tag: [0u8; 32] },
     };
-    nym.send(&inner.requester_addr, wire.to_bytes()).ok();
+    nym.send(&inner.requester_addr, wire.to_bytes().unwrap_or_default()).ok();
 }
 
 /// Handle an inbound `BundleResponse`: decrypt the sealed response, verify the
@@ -1991,7 +1983,7 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
         ciphertext: cert_bytes,
         mac: MessageMac { tag: [0u8; 32] },
     };
-    let wire_bytes = wire.to_bytes();
+    let wire_bytes = wire.to_bytes().unwrap_or_default();
     for contact in &vault.payload.contacts {
         if !contact.bundle.nym_address.is_empty() {
             nym.send(&contact.bundle.nym_address, wire_bytes.clone()).ok();
@@ -2065,7 +2057,7 @@ fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient
         ciphertext: cert_bytes,
         mac: MessageMac { tag: [0u8; 32] },
     };
-    let wire_bytes = wire.to_bytes();
+    let wire_bytes = wire.to_bytes().unwrap_or_default();
     for contact in &vault.payload.contacts {
         if !contact.bundle.nym_address.is_empty() {
             nym.send(&contact.bundle.nym_address, wire_bytes.clone()).ok();
@@ -2078,6 +2070,23 @@ fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 /// Returns a horizontally and vertically centered Rect.
+/// Reconstruct our Bob-side ratchet `StaticSecret` from the vault.
+///
+/// Prefers the dedicated `identity_ratchet_secret` (32 bytes) stored since
+/// first-run. Falls back to the X25519 component of the KEM keypair for
+/// vaults created before the ratchet_secret field was introduced.
+///
+/// Returns `None` only if the vault is corrupt (key bytes malformed).
+fn load_ratchet_secret(vault: &VaultUnlocked) -> Option<StaticSecret> {
+    if vault.payload.identity_ratchet_secret.len() == 32 {
+        let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32].try_into().ok()?;
+        Some(StaticSecret::from(bytes))
+    } else {
+        let kem = HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret).ok()?;
+        Some(StaticSecret::from(kem.x25519_secret.to_bytes()))
+    }
+}
+
 fn centered_rect(pct_x: u16, pct_y: u16, area: Rect) -> Rect {
     let vert = Layout::default()
         .direction(Direction::Vertical)

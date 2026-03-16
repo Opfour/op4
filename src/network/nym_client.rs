@@ -7,8 +7,9 @@
 //! - **Outbound**: each message opens a fresh connection through the Tor
 //!   SOCKS5 proxy (`127.0.0.1:9050`) to `<peer>.onion:LISTEN_PORT`.
 //! - **Hidden-service key**: deterministically derived from the vault's
-//!   identity signing secret via HKDF-SHA256 + SHA-512, so the `.onion`
-//!   address is stable across restarts without extra storage.
+//!   identity signing secret AND KEM secret combined via HKDF-SHA256, then
+//!   expanded with SHA-512, so the `.onion` address is stable across restarts.
+//!   Both secrets must be compromised simultaneously to re-derive the key.
 //! - **Cover traffic**: Poisson-distributed dummy messages to self hide
 //!   whether any real traffic is flowing.
 //!
@@ -28,6 +29,7 @@
 //! `"<56-char-v3-onion>.onion:LISTEN_PORT"` — stored in
 //! `PublicKeyBundle::nym_address` and shared with contacts.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use hkdf::Hkdf;
@@ -35,7 +37,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::error::NetworkError;
 use crate::network::message::make_dummy_message;
@@ -50,6 +52,10 @@ const TOR_CONTROL_ADDR: &str = "127.0.0.1:9051";
 
 /// Mean cover-traffic interval in seconds (Poisson process, λ = 1/30 s⁻¹).
 const COVER_MEAN_SECS: f64 = 30.0;
+
+/// Maximum concurrent inbound TCP connections (DoS / resource-exhaustion guard).
+/// Connections beyond this limit are accepted and immediately dropped.
+const MAX_INBOUND_CONNECTIONS: usize = 64;
 
 /// Maximum inbound frame size in bytes (DoS guard).
 const MAX_FRAME_BYTES: usize = 65_536;
@@ -84,26 +90,42 @@ impl NymClient {
     /// Initialise the Tor transport.
     ///
     /// * `tor_socks_addr` — SOCKS5 proxy, e.g. `"127.0.0.1:9050"`.
-    /// * `identity_signing_secret` — raw bytes of the vault's identity
-    ///   signing keypair; used as HKDF input so the onion address is stable
-    ///   across restarts.  If empty (first run before keypair generation) a
-    ///   session-scoped random seed is used instead.
+    /// * `identity_signing_secret` — Ed25519+ML-DSA signing keypair bytes.
+    /// * `identity_kem_secret` — X25519+ML-KEM KEM keypair bytes.
+    ///
+    /// Both secrets are combined via HKDF before being fed into
+    /// `derive_onion_key`, so an attacker needs BOTH to re-derive the
+    /// hidden-service key from vault material alone.
+    /// If either is empty (first run before keypair generation) a
+    /// session-scoped random seed is used; the address changes on the next
+    /// restart, but no contacts know it yet so this is safe.
     pub async fn init(
         tor_socks_addr: &str,
         identity_signing_secret: &[u8],
+        identity_kem_secret: &[u8],
     ) -> Result<Self, NetworkError> {
         // ── 1. Derive (or randomly seed) the hidden-service key ───────────────
-        let hs_ikm: Vec<u8> = if identity_signing_secret.is_empty() {
-            // First run: keypair not yet generated.  Use a session-scoped
+        let hs_ikm: Vec<u8> = if identity_signing_secret.is_empty() || identity_kem_secret.is_empty() {
+            // First run: keypairs not yet generated.  Use a session-scoped
             // random seed.  The address will change on restart once the real
-            // keypair is stored, but no contacts know our address yet at that
-            // point, so this is safe.
+            // keypairs are stored, but no contacts know our address yet.
             use rand::RngCore;
             let mut tmp = [0u8; 32];
             rand::rngs::OsRng.fill_bytes(&mut tmp);
             tmp.to_vec()
         } else {
-            identity_signing_secret.to_vec()
+            // Combine both secrets: HKDF-SHA256(signing||kem, info="op4-hs-ikm-v1") → 32 B.
+            // Leaking one key alone is insufficient to re-derive the onion address.
+            let mut combined = Vec::with_capacity(
+                identity_signing_secret.len() + identity_kem_secret.len(),
+            );
+            combined.extend_from_slice(identity_signing_secret);
+            combined.extend_from_slice(identity_kem_secret);
+            let hk = Hkdf::<Sha256>::new(None, &combined);
+            let mut ikm = [0u8; 32];
+            hk.expand(b"op4-hs-ikm-v1", &mut ikm)
+                .map_err(|_| NetworkError::NymInit("HKDF failed in hs_ikm derivation".into()))?;
+            ikm.to_vec()
         };
         let hs_key = derive_onion_key(&hs_ikm)?;
         let hs_key_b64 = base64_encode_standard(&hs_key);
@@ -217,11 +239,12 @@ fn derive_onion_key(ikm: &[u8]) -> Result<[u8; 64], NetworkError> {
 
 // ── Tor control-port helpers ──────────────────────────────────────────────────
 
-/// Authenticate with the Tor control port.
+/// Authenticate with the Tor control port using cookie authentication only.
 ///
-/// Tries cookie authentication first (reads the path advertised in
-/// `PROTOCOLINFO`, falling back to `/run/tor/control.authcookie`).
-/// If the cookie file is not readable, falls back to NULL authentication.
+/// Reads the cookie path from `PROTOCOLINFO` (falling back to the Debian
+/// default `/run/tor/control.authcookie`). Requires `COOKIE` or `SAFECOOKIE`
+/// to be advertised; NULL authentication is not accepted as it would allow
+/// any local process to control Tor.
 async fn tor_authenticate(control: &mut TcpStream) -> Result<(), NetworkError> {
     control
         .write_all(b"PROTOCOLINFO 1\r\n")
@@ -230,45 +253,41 @@ async fn tor_authenticate(control: &mut TcpStream) -> Result<(), NetworkError> {
 
     let info = read_tor_response(control).await?;
 
-    let authenticated = if info.contains("COOKIE") || info.contains("SAFECOOKIE") {
-        let cookie_path =
-            extract_cookie_path(&info).unwrap_or_else(|| "/run/tor/control.authcookie".into());
-        if let Ok(cookie) = tokio::fs::read(&cookie_path).await {
-            let hex = bytes_to_hex(&cookie);
-            let cmd = format!("AUTHENTICATE {hex}\r\n");
-            control
-                .write_all(cmd.as_bytes())
-                .await
-                .map_err(|e| NetworkError::NymInit(format!("AUTHENTICATE write: {e}")))?;
-            let resp = read_tor_response(control).await?;
-            resp.contains("250")
-        } else {
-            eprintln!(
-                "[op4] Warning: cannot read Tor cookie at '{cookie_path}'. \
-                 Add yourself to the 'debian-tor' group: sudo adduser $USER debian-tor"
-            );
-            false
-        }
-    } else {
-        false
-    };
+    // Cookie / SafeCookie authentication is required. NULL auth is not
+    // accepted: even on localhost an unauthenticated control port lets any
+    // local process manipulate Tor, violating defense-in-depth.
+    if !info.contains("COOKIE") && !info.contains("SAFECOOKIE") {
+        return Err(NetworkError::NymInit(
+            "Tor control port does not advertise COOKIE authentication. \
+             Ensure /etc/tor/torrc contains 'CookieAuthentication 1' and restart Tor."
+                .into(),
+        ));
+    }
 
-    if !authenticated {
-        // NULL auth (works when CookieAuthentication is off, e.g. in dev)
-        control
-            .write_all(b"AUTHENTICATE\r\n")
-            .await
-            .map_err(|e| NetworkError::NymInit(format!("AUTHENTICATE (null) write: {e}")))?;
-        let resp = read_tor_response(control).await?;
-        if !resp.contains("250") {
-            return Err(NetworkError::NymInit(
-                "Tor authentication failed. \
-                 Ensure /etc/tor/torrc contains 'ControlPort 9051' and \
-                 'CookieAuthentication 1', restart Tor, and add the op4 user \
-                 to the 'debian-tor' group."
-                    .into(),
-            ));
-        }
+    let cookie_path =
+        extract_cookie_path(&info).unwrap_or_else(|| "/run/tor/control.authcookie".into());
+    let cookie = tokio::fs::read(&cookie_path).await.map_err(|e| {
+        NetworkError::NymInit(format!(
+            "Cannot read Tor cookie at '{cookie_path}': {e}. \
+             Add yourself to the 'debian-tor' group: sudo adduser $USER debian-tor"
+        ))
+    })?;
+
+    let hex = bytes_to_hex(&cookie);
+    let cmd = format!("AUTHENTICATE {hex}\r\n");
+    control
+        .write_all(cmd.as_bytes())
+        .await
+        .map_err(|e| NetworkError::NymInit(format!("AUTHENTICATE write: {e}")))?;
+    let resp = read_tor_response(control).await?;
+    if !resp.contains("250") {
+        return Err(NetworkError::NymInit(
+            "Tor cookie authentication rejected. \
+             Ensure /etc/tor/torrc contains 'ControlPort 9051' and \
+             'CookieAuthentication 1', restart Tor, and add the op4 user \
+             to the 'debian-tor' group."
+                .into(),
+        ));
     }
 
     Ok(())
@@ -387,9 +406,15 @@ async fn socks5_connect(socks_addr: &str, target: &str) -> std::io::Result<TcpSt
     // IsolateSOCKSAuth is set on the SocksPort. Each unique pair gets its own
     // circuit, so messages to different peers stay on separate paths.
     let user = target.as_bytes(); // "abc123…xyz.onion:14101"
-    let user_len = user.len().min(255) as u8;
+    if user.len() > 255 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "SOCKS5 isolation username exceeds 255 bytes",
+        ));
+    }
+    let user_len = user.len() as u8;
     let mut auth_msg = vec![0x01, user_len];   // VER=1, ULEN
-    auth_msg.extend_from_slice(&user[..user_len as usize]);
+    auth_msg.extend_from_slice(user);
     auth_msg.push(0x01); // PLEN = 1
     auth_msg.push(0x00); // PASSWD = \x00  (Tor accepts any value)
     s.write_all(&auth_msg).await?;
@@ -473,12 +498,31 @@ async fn read_frame(stream: &mut TcpStream) -> Option<Vec<u8>> {
 // ── Background tasks ──────────────────────────────────────────────────────────
 
 /// Accept inbound TCP connections and push each payload into the receive queue.
+///
+/// A semaphore caps concurrent in-flight connections at `MAX_INBOUND_CONNECTIONS`.
+/// Connections beyond that limit are accepted (so the OS doesn't queue them
+/// indefinitely) and then immediately dropped, returning a TCP RST to the peer.
 async fn inbound_loop(listener: TcpListener, recv_tx: mpsc::UnboundedSender<IncomingMessage>) {
+    let sem = Arc::new(Semaphore::new(MAX_INBOUND_CONNECTIONS));
     loop {
         match listener.accept().await {
             Ok((mut stream, _peer)) => {
+                // Try to acquire without blocking — if we're at the limit, drop
+                // the connection rather than spawning an unbounded number of tasks.
+                let permit = match sem.clone().try_acquire_owned() {
+                    Ok(p) => p,
+                    Err(_) => {
+                        eprintln!(
+                            "[op4] inbound connection dropped: \
+                             {MAX_INBOUND_CONNECTIONS} concurrent connections limit reached"
+                        );
+                        drop(stream);
+                        continue;
+                    }
+                };
                 let tx = recv_tx.clone();
                 tokio::spawn(async move {
+                    let _permit = permit; // holds the semaphore slot for the task's lifetime
                     if let Some(payload) = read_frame(&mut stream).await {
                         let _ = tx.send(IncomingMessage {
                             sender_tag: None,

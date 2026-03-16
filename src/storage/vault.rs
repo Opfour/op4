@@ -203,12 +203,16 @@ impl VaultUnlocked {
     /// The result is used to encrypt/decrypt `ConversationMeta::ratchet_state_ct`.
     pub fn derive_conversation_key(&self, conversation_id: &[u8; 32]) -> SymKey {
         use crate::crypto::primitives::hkdf_expand;
+        use zeroize::Zeroizing;
         let mut info = b"op4-conv-key-v1".to_vec();
         info.extend_from_slice(conversation_id);
-        let mut out = [0u8; 32];
-        hkdf_expand(&self.master_key.0, None, &info, &mut out)
+        // Wrap in Zeroizing so the raw bytes are overwritten on function exit,
+        // even though they are immediately moved into SymKey (which is itself
+        // ZeroizeOnDrop). Prevents the intermediate stack buffer from lingering.
+        let mut out = Zeroizing::new([0u8; 32]);
+        hkdf_expand(&self.master_key.0, None, &info, out.as_mut())
             .expect("HKDF expand is infallible for a 32-byte output");
-        SymKey(out)
+        SymKey(*out)
     }
 
     /// Find the index of a `ConversationMeta` whose `contact_id` matches.
@@ -424,4 +428,114 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    // All vault tests use Argon2id at 64 MiB / 3 iterations (the production
+    // default).  Each create+unlock pair takes several seconds.  Run them
+    // explicitly with:
+    //   cargo test --bin op4 storage::vault -- --include-ignored
+    //
+    // They are characterisation tests: they document current behaviour without
+    // changing it.
+
+    #[test]
+    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
+    fn create_and_unlock_normal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+
+        VaultUnlocked::create(&path, b"normal-pass", b"duress-pass").unwrap();
+        let v = VaultUnlocked::unlock(&path, b"normal-pass").unwrap();
+
+        assert!(!v.is_duress);
+        assert!(v.payload.contacts.is_empty());
+    }
+
+    #[test]
+    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
+    fn create_and_unlock_duress() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+
+        VaultUnlocked::create(&path, b"normal-pass", b"duress-pass").unwrap();
+        let v = VaultUnlocked::unlock(&path, b"duress-pass").unwrap();
+
+        assert!(v.is_duress);
+        // The duress payload has the sentinel address set in VaultUnlocked::create
+        assert_eq!(v.payload.nym_address, "[duress]");
+    }
+
+    #[test]
+    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
+    fn wrong_passphrase_returns_invalid_passphrase() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+
+        VaultUnlocked::create(&path, b"correct", b"duress").unwrap();
+        let result = VaultUnlocked::unlock(&path, b"wrong");
+
+        assert!(matches!(result, Err(VaultError::InvalidPassphrase)));
+    }
+
+    #[test]
+    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
+    fn save_persists_payload_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+
+        let mut vault = VaultUnlocked::create(&path, b"pass", b"duress").unwrap();
+        vault.payload.nym_address = "onion_addr".into();
+        vault.payload.sequence = 42;
+        vault.save().unwrap();
+
+        let reloaded = VaultUnlocked::unlock(&path, b"pass").unwrap();
+        assert_eq!(reloaded.payload.nym_address, "onion_addr");
+        assert_eq!(reloaded.payload.sequence, 42);
+    }
+
+    #[test]
+    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
+    fn duress_passphrase_still_works_after_normal_save() {
+        // Saving with the normal key must not corrupt the duress section
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+
+        let mut vault = VaultUnlocked::create(&path, b"normal", b"duress").unwrap();
+        vault.payload.sequence = 1;
+        vault.save().unwrap();
+
+        let dv = VaultUnlocked::unlock(&path, b"duress").unwrap();
+        assert!(dv.is_duress);
+        assert_eq!(dv.payload.nym_address, "[duress]");
+    }
+
+    #[test]
+    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
+    fn vault_file_starts_with_magic_and_version() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+        VaultUnlocked::create(&path, b"pass", b"duress").unwrap();
+        let raw = fs::read(&path).unwrap();
+        assert_eq!(&raw[..4], b"OP4V");
+        assert_eq!(raw[4], 2, "VAULT_VERSION must be 2");
+    }
+
+    #[test]
+    fn corrupt_file_returns_error_without_argon2() {
+        // This test does NOT invoke Argon2id: it reads a garbage file and
+        // expects parse_header to fail before any KDF work is attempted.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+        fs::write(&path, b"not a vault").unwrap();
+        let result = VaultUnlocked::unlock(&path, b"any");
+        assert!(matches!(
+            result,
+            Err(VaultError::InvalidMagic) | Err(VaultError::Corrupt)
+        ));
+    }
 }

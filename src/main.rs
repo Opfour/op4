@@ -103,7 +103,8 @@ async fn main() {
     // the Tor SOCKS5 proxy.  Must complete before the seccomp lock.
     let tor_addr = vault.payload.settings.tor_socks_addr.clone();
     let signing_secret = vault.payload.identity_signing_secret.clone();
-    let mut nym = match NymClient::init(&tor_addr, &signing_secret).await {
+    let kem_secret = vault.payload.identity_kem_secret.clone();
+    let mut nym = match NymClient::init(&tor_addr, &signing_secret, &kem_secret).await {
         Ok(c) => c,
         Err(e) => {
             restore_terminal(&mut terminal);
