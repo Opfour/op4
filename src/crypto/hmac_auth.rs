@@ -55,33 +55,63 @@ mod tests {
     #[test]
     fn compute_verify_correct() {
         let mac = compute_message_mac(&key(), &conv_id(), 0, b"ciphertext");
-        assert!(verify_message_mac(&key(), &conv_id(), 0, b"ciphertext", &mac));
+        assert!(verify_message_mac(
+            &key(),
+            &conv_id(),
+            0,
+            b"ciphertext",
+            &mac
+        ));
     }
 
     #[test]
     fn verify_wrong_key_fails() {
         let mac = compute_message_mac(&key(), &conv_id(), 0, b"ciphertext");
         let other_key = MacKey([0x99u8; 32]);
-        assert!(!verify_message_mac(&other_key, &conv_id(), 0, b"ciphertext", &mac));
+        assert!(!verify_message_mac(
+            &other_key,
+            &conv_id(),
+            0,
+            b"ciphertext",
+            &mac
+        ));
     }
 
     #[test]
     fn verify_wrong_counter_fails() {
         let mac = compute_message_mac(&key(), &conv_id(), 0, b"ciphertext");
-        assert!(!verify_message_mac(&key(), &conv_id(), 1, b"ciphertext", &mac));
+        assert!(!verify_message_mac(
+            &key(),
+            &conv_id(),
+            1,
+            b"ciphertext",
+            &mac
+        ));
     }
 
     #[test]
     fn verify_wrong_ciphertext_fails() {
         let mac = compute_message_mac(&key(), &conv_id(), 0, b"ciphertext");
-        assert!(!verify_message_mac(&key(), &conv_id(), 0, b"different", &mac));
+        assert!(!verify_message_mac(
+            &key(),
+            &conv_id(),
+            0,
+            b"different",
+            &mac
+        ));
     }
 
     #[test]
     fn verify_wrong_conv_id_fails() {
         let mac = compute_message_mac(&key(), &conv_id(), 0, b"ciphertext");
         let other_id = [0x02u8; 32];
-        assert!(!verify_message_mac(&key(), &other_id, 0, b"ciphertext", &mac));
+        assert!(!verify_message_mac(
+            &key(),
+            &other_id,
+            0,
+            b"ciphertext",
+            &mac
+        ));
     }
 
     #[test]
