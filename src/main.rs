@@ -20,14 +20,14 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair};
-use rand::rngs::OsRng;
-use x25519_dalek::StaticSecret;
 use crate::error::{AppError, VaultError};
 use crate::hardening::memory::apply_memory_hardening;
 use crate::hardening::seccomp::install_seccomp_filter;
 use crate::network::nym_client::NymClient;
 use crate::storage::vault::VaultUnlocked;
 use crate::ui::passphrase::{prompt_new_passphrase, prompt_unlock_passphrase};
+use rand::rngs::OsRng;
+use x25519_dalek::StaticSecret;
 use zeroize::Zeroizing;
 
 /// Source hash generated at build time by build.rs over all src/**/*.rs files.
@@ -103,7 +103,8 @@ async fn main() {
     // the Tor SOCKS5 proxy.  Must complete before the seccomp lock.
     let tor_addr = vault.payload.settings.tor_socks_addr.clone();
     let signing_secret = vault.payload.identity_signing_secret.clone();
-    let mut nym = match NymClient::init(&tor_addr, &signing_secret).await {
+    let kem_secret = vault.payload.identity_kem_secret.clone();
+    let mut nym = match NymClient::init(&tor_addr, &signing_secret, &kem_secret).await {
         Ok(c) => c,
         Err(e) => {
             restore_terminal(&mut terminal);

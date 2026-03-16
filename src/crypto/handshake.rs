@@ -80,23 +80,32 @@ pub fn perform_handshake_alice(
     // Derive session key
     let session_key = combine_dh_outputs(dh1.as_bytes(), dh2.as_bytes(), dh3.as_bytes(), &dh4_ss)?;
 
-    // Encrypt initial payload with session key
-    let alice_identity_bytes = postcard::to_allocvec(&alice_kem.x25519_public.to_bytes())
-        .map_err(|_| CryptoError::AeadEncrypt)?;
-    let initial_ct = aead_encrypt(&session_key, initial_plaintext, &alice_identity_bytes)?;
+    // Build the identity bundle first — it is used as AAD and MAC input so that
+    // ALL identity fields (Ed25519, ML-DSA, ratchet pub, nym address) are
+    // cryptographically bound to the message, preventing field substitution attacks.
+    let alice_identity = PublicKeyBundle::from_keypairs(
+        alice_kem,
+        alice_signing,
+        alice_ratchet_pub,
+        alice_nym_address,
+    );
 
-    // HMAC over header fields for integrity (using session key as MAC key)
-    let alice_id_bytes = postcard::to_allocvec(&alice_kem.x25519_public.to_bytes())
-        .map_err(|_| CryptoError::AeadEncrypt)?;
-    let mlkem_ct_bytes = postcard::to_allocvec(&mlkem_ct).map_err(|_| CryptoError::AeadEncrypt)?;
+    // Serialize the FULL bundle (not just the X25519 key) as AEAD additional data.
+    // Bob will serialize the received bundle and must get the same bytes.
+    let alice_id_bytes =
+        postcard::to_allocvec(&alice_identity).map_err(|_| CryptoError::Serialize)?;
+
+    // Encrypt initial payload, binding Alice's complete identity as AAD.
+    let initial_ct = aead_encrypt(&session_key, initial_plaintext, &alice_id_bytes)?;
+
+    // HMAC over (full_identity_bundle || alice_ek_x25519 || mlkem_ct) using session key.
+    // Covers every field that could be swapped by a relay.
+    let mlkem_ct_bytes = postcard::to_allocvec(&mlkem_ct).map_err(|_| CryptoError::Serialize)?;
     let mut mac_input = Vec::new();
     mac_input.extend_from_slice(&alice_id_bytes);
     mac_input.extend_from_slice(&alice_ek_pub.to_bytes());
     mac_input.extend_from_slice(&mlkem_ct_bytes);
     let mac = crate::crypto::primitives::hmac_sign_raw(&session_key.0, &mac_input);
-
-    let alice_identity =
-        PublicKeyBundle::from_keypairs(alice_kem, alice_signing, alice_ratchet_pub, alice_nym_address);
 
     Ok((
         HandshakeInitMessage {
@@ -142,23 +151,25 @@ pub fn perform_handshake_bob(
     // Derive session key (must match Alice's derivation)
     let session_key = combine_dh_outputs(dh1.as_bytes(), dh2.as_bytes(), dh3.as_bytes(), &dh4_ss)?;
 
-    // Verify MAC — must use Alice's x25519 pub (from msg) to match Alice's MAC input
-    let alice_id_bytes = postcard::to_allocvec(&msg.alice_identity.x25519_pub)
-        .map_err(|_| CryptoError::AeadDecrypt)?;
+    // Serialize Alice's FULL received identity bundle — this must match Alice's
+    // serialization exactly. Any field substituted in transit will produce
+    // different bytes and fail either the MAC or AEAD tag check.
+    let alice_id_bytes =
+        postcard::to_allocvec(&msg.alice_identity).map_err(|_| CryptoError::AeadDecrypt)?;
     let mlkem_ct_bytes =
         postcard::to_allocvec(&msg.alice_mlkem_ct).map_err(|_| CryptoError::AeadDecrypt)?;
     let mut mac_input = Vec::new();
     mac_input.extend_from_slice(&alice_id_bytes);
     mac_input.extend_from_slice(&msg.alice_ek_x25519);
     mac_input.extend_from_slice(&mlkem_ct_bytes);
-    let expected_mac = crate::crypto::primitives::hmac_sign_raw(&session_key.0, &mac_input);
-    if expected_mac != msg.mac {
+
+    // Constant-time MAC verification — prevents timing side-channels.
+    // Using hmac_verify_raw (backed by subtle::ConstantTimeEq) rather than `!=`.
+    if !crate::crypto::primitives::hmac_verify_raw(&session_key.0, &mac_input, &msg.mac) {
         return Err(CryptoError::AeadDecrypt);
     }
 
-    // Decrypt initial payload
-    let alice_id_bytes = postcard::to_allocvec(&msg.alice_identity.x25519_pub)
-        .map_err(|_| CryptoError::AeadDecrypt)?;
+    // Decrypt initial payload using the same full-bundle AAD that Alice used.
     let plaintext = aead_decrypt(&session_key, &msg.initial_ct, &alice_id_bytes)?;
 
     Ok((plaintext, session_key))
@@ -181,4 +192,124 @@ fn combine_dh_outputs(
     let mut sk = [0u8; AEAD_KEY_LEN];
     hkdf_expand(&ikm, Some(&[0u8; 32]), b"op4-x3dh-v1", &mut sk)?;
     Ok(SymKey(sk))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
+    use rand::rngs::OsRng;
+
+    /// Build a fresh Bob identity: KEM keypair, signing keypair, ratchet secret,
+    /// and a `PublicKeyBundle` with the ratchet public key embedded.
+    fn make_bob() -> (
+        HybridKemKeypair,
+        HybridSigningKeypair,
+        StaticSecret,
+        PublicKeyBundle,
+    ) {
+        let kem = HybridKemKeypair::generate();
+        let signing = HybridSigningKeypair::generate();
+        let ratchet_secret = StaticSecret::random_from_rng(OsRng);
+        let ratchet_pub = X25519PublicKey::from(&ratchet_secret).to_bytes();
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, ratchet_pub, "bob_addr".into());
+        (kem, signing, ratchet_secret, bundle)
+    }
+
+    #[test]
+    fn session_keys_match_after_handshake() {
+        let (bob_kem, _bob_signing, bob_ratchet_secret, bob_bundle) = make_bob();
+        let alice_kem = HybridKemKeypair::generate();
+        let alice_signing = HybridSigningKeypair::generate();
+
+        let (msg, alice_sk) = perform_handshake_alice(
+            &alice_kem,
+            &alice_signing,
+            [0u8; 32],
+            "alice_addr".into(),
+            &bob_bundle,
+            b"hello bob",
+        )
+        .unwrap();
+
+        let (plaintext, bob_sk) =
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).unwrap();
+
+        assert_eq!(alice_sk.0, bob_sk.0, "session keys must match");
+        assert_eq!(
+            plaintext, b"hello bob",
+            "initial plaintext must survive E2EE"
+        );
+    }
+
+    #[test]
+    fn alice_identity_embedded_in_message() {
+        let (_bob_kem, _bob_signing, _bob_ratchet_secret, bob_bundle) = make_bob();
+        let alice_kem = HybridKemKeypair::generate();
+        let alice_signing = HybridSigningKeypair::generate();
+
+        let (msg, _) = perform_handshake_alice(
+            &alice_kem,
+            &alice_signing,
+            [0u8; 32],
+            "alice_addr".into(),
+            &bob_bundle,
+            b"hi",
+        )
+        .unwrap();
+
+        // Alice's X25519 public key must be in the message
+        assert_eq!(
+            msg.alice_identity.x25519_pub,
+            alice_kem.x25519_public.to_bytes()
+        );
+        assert_eq!(msg.alice_identity.nym_address, "alice_addr");
+    }
+
+    #[test]
+    fn tampered_mac_rejected() {
+        let (bob_kem, _bob_signing, bob_ratchet_secret, bob_bundle) = make_bob();
+        let alice_kem = HybridKemKeypair::generate();
+        let alice_signing = HybridSigningKeypair::generate();
+
+        let (mut msg, _) = perform_handshake_alice(
+            &alice_kem,
+            &alice_signing,
+            [0u8; 32],
+            "alice_addr".into(),
+            &bob_bundle,
+            b"hi",
+        )
+        .unwrap();
+
+        msg.mac[0] ^= 0xff; // flip a bit in the HMAC tag
+        assert!(
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).is_err(),
+            "tampered MAC must be rejected"
+        );
+    }
+
+    #[test]
+    fn tampered_ciphertext_rejected() {
+        let (bob_kem, _bob_signing, bob_ratchet_secret, bob_bundle) = make_bob();
+        let alice_kem = HybridKemKeypair::generate();
+        let alice_signing = HybridSigningKeypair::generate();
+
+        let (mut msg, _) = perform_handshake_alice(
+            &alice_kem,
+            &alice_signing,
+            [0u8; 32],
+            "alice_addr".into(),
+            &bob_bundle,
+            b"secret",
+        )
+        .unwrap();
+
+        // Corrupt the encrypted payload
+        if let Some(b) = msg.initial_ct.first_mut() {
+            *b ^= 0xff;
+        }
+        // Either the MAC check or AEAD decryption must reject this
+        assert!(perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).is_err());
+    }
 }

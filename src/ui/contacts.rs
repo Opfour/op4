@@ -40,9 +40,7 @@ pub fn render_contacts(
             let badge = if unread > 0 {
                 Span::styled(
                     format!(" ({unread})"),
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )
             } else {
                 Span::raw("")
