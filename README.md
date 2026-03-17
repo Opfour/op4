@@ -83,6 +83,7 @@ below for the version you installed.
 
 | Version | Source hash |
 |---|---|
+| `0.2.0-dev` | `35740577f6c4a4f19c5a08fe85b1f78a10347f2ba9dd7642d126552266bfa5a5` |
 | `0.1.0` | `e1a94761c7d3fa589ba892b47d5295aa417f95aee126809d51a7e7fb7e78982c` |
 
 You can also check it without launching the full app:
@@ -447,7 +448,7 @@ op4/
 
 ## Current Status
 
-**Version: 0.1.0-dev (pre-release)**
+**Version: 0.2.0-dev (pre-release)**
 
 op4 is under active development. The following layers are complete and
 tested:
@@ -472,7 +473,7 @@ All layers are now wired end-to-end:
   the routing layer never reveals who sent the message).
 
 All known limitations have been resolved. The application is now at
-feature-complete status for 0.1.0-dev:
+feature-complete status for 0.2.0-dev:
 
 - **HMAC deniable authentication** is fully wired. Every outbound data
   message carries an HMAC-SHA256 tag computed from the per-message ratchet
