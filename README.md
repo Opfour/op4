@@ -448,7 +448,7 @@ op4/
 
 ## Current Status
 
-**Version: 0.1.0-dev (pre-release)**
+**Version: 0.2.0-dev (pre-release)**
 
 op4 is under active development. The following layers are complete and
 tested:
@@ -473,7 +473,7 @@ All layers are now wired end-to-end:
   the routing layer never reveals who sent the message).
 
 All known limitations have been resolved. The application is now at
-feature-complete status for 0.1.0-dev:
+feature-complete status for 0.2.0-dev:
 
 - **HMAC deniable authentication** is fully wired. Every outbound data
   message carries an HMAC-SHA256 tag computed from the per-message ratchet
