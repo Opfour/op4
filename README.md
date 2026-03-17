@@ -83,6 +83,7 @@ below for the version you installed.
 
 | Version | Source hash |
 |---|---|
+| `0.2.0-dev` | `35740577f6c4a4f19c5a08fe85b1f78a10347f2ba9dd7642d126552266bfa5a5` |
 | `0.1.0` | `e1a94761c7d3fa589ba892b47d5295aa417f95aee126809d51a7e7fb7e78982c` |
 
 You can also check it without launching the full app:
