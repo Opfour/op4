@@ -177,6 +177,7 @@ stored at `~/.local/share/op4/vault.op4`.
 | Debian 12 | Supported |
 | Fedora 39+ | Supported |
 | Arch Linux (current) | Supported |
+| Tails OS | Supported ([setup guide](docs/DOWNLOADS.md#option-5--tails-os-persistent-storage)) |
 | macOS / Windows / WSL1 | Not supported |
 
 Minimum kernel: **4.15** (5.4+ recommended). Architecture: **x86-64**
