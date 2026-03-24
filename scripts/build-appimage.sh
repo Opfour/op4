@@ -16,7 +16,7 @@ cd "$PROJECT_ROOT"
 BINARY="target/release/op4"
 APPDIR="build/AppDir"
 APPIMAGETOOL="build/appimagetool-x86_64.AppImage"
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+VERSION="${VERSION:-$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')}"
 
 # ── Verify binary exists ────────────────────────────────────────────────────
 
