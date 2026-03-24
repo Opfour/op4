@@ -297,14 +297,29 @@ Persistent Storage:
 ```bash
 cat > ~/Persistent/op4-tor-setup.sh << 'SETUP'
 #!/bin/bash
-# Enable Tor control port for op4 on Tails
+# op4 session setup for Tails
+# Run this after every boot: bash ~/Persistent/op4-tor-setup.sh
 set -e
+
+# 1. Enable Tor control port
 sudo sh -c 'grep -q "^ControlPort 9051" /etc/tor/torrc || echo "ControlPort 9051" >> /etc/tor/torrc'
 sudo sh -c 'grep -q "^CookieAuthentication 1" /etc/tor/torrc || echo "CookieAuthentication 1" >> /etc/tor/torrc'
 sudo systemctl restart tor@default
+echo "[+] Waiting for Tor to reconnect..."
 sleep 10
+
+# 2. Grant cookie access
 sudo usermod -aG debian-tor amnesia
-echo "[ok] Tor control port enabled. Run: newgrp debian-tor && ~/Persistent/op4-*-x86_64.AppImage"
+
+# 3. Persist vault to encrypted USB (RAM is wiped on shutdown)
+mkdir -p ~/Persistent/op4-data
+mkdir -p ~/.local/share
+ln -sf ~/Persistent/op4-data ~/.local/share/op4
+
+echo ""
+echo "[ok] op4 is ready. Run:"
+echo "     newgrp debian-tor"
+echo "     ~/Persistent/op4-*-x86_64.AppImage"
 SETUP
 chmod +x ~/Persistent/op4-tor-setup.sh
 ```
@@ -316,18 +331,58 @@ bash ~/Persistent/op4-tor-setup.sh
 newgrp debian-tor
 ```
 
-#### 4. Run op4
+#### 4. Persist the vault directory
+
+**This step is critical.** Tails runs the home directory (`/home/amnesia`)
+in RAM — it is **not** on the Persistent Storage partition. Without this
+step, op4 creates its vault in RAM and your identity keys, contacts,
+and message history are **permanently destroyed on shutdown**.
+
+op4 stores its vault at `~/.local/share/op4/vault.op4`. You need to
+redirect this to Persistent Storage using a symlink:
+
+```bash
+# Create the vault directory on Persistent Storage
+mkdir -p ~/Persistent/op4-data
+
+# Create the parent directory in RAM (needed for the symlink)
+mkdir -p ~/.local/share
+
+# Symlink so op4 writes to Persistent Storage
+ln -s ~/Persistent/op4-data ~/.local/share/op4
+```
+
+Add these symlink commands to the setup script so they run on every boot
+(the RAM filesystem is empty on each boot, so the symlink must be
+recreated):
+
+```bash
+cat >> ~/Persistent/op4-tor-setup.sh << 'VAULT'
+
+# Persist vault to encrypted USB (RAM is wiped on shutdown)
+mkdir -p ~/Persistent/op4-data
+mkdir -p ~/.local/share
+ln -sf ~/Persistent/op4-data ~/.local/share/op4
+VAULT
+```
+
+Alternatively, enable the **Dotfiles** persistence feature in Tails
+and place the symlink in `~/Persistent/.local/share/op4` — Tails will
+automatically create it in the home directory on each boot. See the
+[Tails Dotfiles documentation](https://tails.net/doc/persistent_storage/configure/index.en.html)
+for details.
+
+#### 5. Run op4
 
 ```bash
 ~/Persistent/op4-*-x86_64.AppImage
 ```
 
-On first launch, op4 creates its vault. Because your home directory
-is on the Persistent Storage volume, the vault at
-`~/.local/share/op4/vault.op4` is automatically stored on the encrypted
+On first launch, op4 creates its vault. The symlink ensures it is
+written to `~/Persistent/op4-data/vault.op4` on the LUKS-encrypted
 USB partition.
 
-#### 5. Verify the binary
+#### 6. Verify the binary
 
 ```bash
 ~/Persistent/op4-*-x86_64.AppImage --print-hash
@@ -341,23 +396,28 @@ Compare against the
 After setup, your Persistent Storage contains:
 
 ```
-~/Persistent/
-├── op4-<version>-x86_64.AppImage      # The binary
+~/Persistent/                                    # LUKS-encrypted USB
+├── op4-<version>-x86_64.AppImage                # The binary
 ├── op4-<version>-x86_64.AppImage.sha256
-└── op4-tor-setup.sh                   # Tor config script
+├── op4-tor-setup.sh                             # Tor + vault setup script
+└── op4-data/
+    └── vault.op4                                # Encrypted vault
 
-~/.local/share/op4/
-└── vault.op4                          # Encrypted vault (auto-created)
+~/.local/share/op4 → ~/Persistent/op4-data/     # Symlink (recreated each boot)
 ```
 
-Both directories live on the LUKS-encrypted Persistent Storage partition.
-When Tails shuts down, the USB is the only place any op4 data exists —
-the host machine retains nothing.
+Only the `~/Persistent/` directory lives on the encrypted USB. Everything
+else (`~/.local/`, the symlink) is in RAM and destroyed on shutdown.
+The host machine retains nothing.
 
 ### Known limitations on Tails
 
 - **Control port config resets on reboot.** Tails rebuilds `/etc/tor/torrc`
   from scratch on every boot. The setup script must run each session.
+- **Vault symlink must be recreated each boot.** The RAM filesystem is
+  empty on startup. The symlink from `~/.local/share/op4` to Persistent
+  Storage must be recreated, or the vault will be written to RAM and
+  lost on shutdown. The setup script handles this.
 - **No AppArmor profile auto-install.** Tails has its own AppArmor
   policy. The op4 AppArmor profile (`apparmor/op4.profile`) can be
   loaded manually with `sudo apparmor_parser -r` but will not persist
@@ -368,6 +428,13 @@ the host machine retains nothing.
 - **Performance.** Tails runs from USB and RAM. Argon2id vault
   derivation and Tor circuit setup may be slower than on a native
   install, especially on older hardware.
+- **Building from source is impractical.** Tails has limited RAM
+  (typically 4-8 GB shared with the OS), no persistent dev tools, and
+  no compiler by default. Use the pre-built AppImage.
+- **AppImage requires exec permission.** If Persistent Storage is
+  mounted with `noexec` (some Tails configurations), the AppImage
+  will not run. Fix with: `sudo mount -o remount,exec /home/amnesia/Persistent`
+  (add to the setup script if needed).
 
 ### Security notes
 
@@ -382,6 +449,38 @@ the host machine retains nothing.
   identical to a real (empty) vault. Combined with Tails' amnesic
   properties, this provides plausible deniability — there is no
   filesystem artifact on the host to contradict the decoy.
+- **Never use the Unsafe Browser for op4.** Tails includes an "Unsafe
+  Browser" that bypasses Tor for captive portal login. Never use it to
+  download the op4 AppImage or access the GitHub releases page — this
+  would reveal to your ISP/network that you are downloading op4. Use
+  the regular Tor Browser or `torsocks wget` in the terminal.
+- **Do not copy the vault to multiple USB drives.** If you clone the
+  vault to a second Tails USB and use both, the Double Ratchet state
+  will diverge between the two copies. Messages sent from one copy
+  will break the ratchet chain on the other, causing decryption
+  failures and potentially losing messages permanently. One vault,
+  one device.
+- **Back up the USB drive.** If the USB drive fails, your vault —
+  identity keys, contacts, and message history — is gone permanently.
+  There is no cloud backup by design. Periodically copy
+  `~/Persistent/op4-data/vault.op4` to a second encrypted medium
+  (e.g., a LUKS-encrypted backup USB) and store it securely. **Do not
+  use both copies simultaneously** (see above about ratchet divergence).
+- **USB flash wear leveling.** LUKS encrypts data at rest, but USB
+  flash drives use wear-leveling algorithms that may leave old copies
+  of data blocks in areas the filesystem can no longer access. For
+  extremely high-threat models, consider using a USB drive with
+  hardware encryption (e.g., IronKey) or accept that physical seizure
+  + advanced forensics on a standard USB could theoretically recover
+  fragments of encrypted data (which are still protected by LUKS +
+  Argon2id).
+- **Cold boot window.** When Tails shuts down, it overwrites RAM
+  before powering off. However, there is a brief window (seconds)
+  during shutdown where key material may still be in physical memory.
+  op4's `mlockall` prevents swap but does not protect against a cold
+  boot attack during this window. To mitigate: shut down Tails in a
+  physically secure location, and do not leave the machine unattended
+  during shutdown.
 
 ---
 
