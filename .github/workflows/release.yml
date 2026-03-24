@@ -49,7 +49,7 @@ jobs:
           echo "SOURCE_HASH=$(./target/release/op4 --print-hash)" >> "$GITHUB_ENV"
 
       - name: Build AppImage
-        run: bash scripts/build-appimage.sh
+        run: VERSION="${GITHUB_REF_NAME#v}" bash scripts/build-appimage.sh
 
       - name: Create source tarball
         run: |
