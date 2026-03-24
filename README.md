@@ -52,6 +52,12 @@ daemon running on your own machine.
 
 ## Installation
 
+> **All download options** — AppImage, source tarball, clone & build, and
+> automated installer — are documented in the
+> [Downloads & Install guide](docs/DOWNLOADS.md).
+> The latest release is available on the
+> [Releases page](https://github.com/Opfour/op4/releases/latest).
+
 ### Debian / Ubuntu (automated)
 
 On Debian and Ubuntu, `install/setup.sh` handles everything in one command:
