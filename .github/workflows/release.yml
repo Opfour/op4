@@ -1,0 +1,116 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_DATE_EPOCH: "0"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (from rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install ImageMagick (for icon conversion)
+        run: sudo apt-get update -qq && sudo apt-get install -y imagemagick
+
+      - name: Run tests
+        run: cargo test --locked
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Record binary hash
+        run: |
+          sha256sum target/release/op4 | tee binary.sha256
+          echo "BINARY_SHA256=$(sha256sum target/release/op4 | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "SOURCE_HASH=$(./target/release/op4 --print-hash)" >> "$GITHUB_ENV"
+
+      - name: Build AppImage
+        run: bash scripts/build-appimage.sh
+
+      - name: Create source tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          git archive --format=tar.gz --prefix="op4-${VERSION}/" HEAD -o "op4-${VERSION}.tar.gz"
+          sha256sum "op4-${VERSION}.tar.gz" > "op4-${VERSION}.tar.gz.sha256"
+
+      - name: Extract version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "op4 v${{ env.VERSION }}"
+          draft: false
+          prerelease: ${{ contains(env.VERSION, 'dev') || contains(env.VERSION, 'rc') || contains(env.VERSION, 'alpha') || contains(env.VERSION, 'beta') }}
+          generate_release_notes: false
+          body: |
+            ## op4 v${{ env.VERSION }}
+
+            **Secure Terminal Messenger — End-to-End Encrypted Private Messages over Tor**
+
+            ### Download options
+
+            | File | Description |
+            |------|-------------|
+            | `op4-${{ env.VERSION }}-x86_64.AppImage` | Portable Linux binary (recommended) |
+            | `op4-${{ env.VERSION }}.tar.gz` | Source code archive |
+
+            ### Quick start (AppImage)
+
+            ```bash
+            chmod +x op4-${{ env.VERSION }}-x86_64.AppImage
+            ./op4-${{ env.VERSION }}-x86_64.AppImage
+            ```
+
+            > **Requires:** Tor daemon running with ControlPort 9051 and CookieAuthentication enabled.
+
+            ### Verify integrity
+
+            **Binary checksum (SHA-256):**
+            ```
+            ${{ env.BINARY_SHA256 }}
+            ```
+
+            **Source hash** (printed by `op4 --print-hash`):
+            ```
+            ${{ env.SOURCE_HASH }}
+            ```
+
+            Compare the source hash against the [release hash table](https://github.com/Opfour/op4#release-hash-verification) in the README.
+
+            ### Requirements
+
+            - Linux x86-64 (kernel 4.15+, 5.4+ recommended)
+            - Tor daemon with control port enabled
+            - Terminal with ANSI support
+
+            See [full installation guide](https://github.com/Opfour/op4/blob/main/docs/DOWNLOADS.md) for all options.
+          files: |
+            op4-${{ env.VERSION }}-x86_64.AppImage
+            op4-${{ env.VERSION }}-x86_64.AppImage.sha256
+            op4-${{ env.VERSION }}.tar.gz
+            op4-${{ env.VERSION }}.tar.gz.sha256
