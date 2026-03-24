@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=op4
+Comment=Secure Terminal Messenger — End-to-End Encrypted Private Messages over Tor
+Exec=op4
+Icon=op4
+Terminal=true
+Type=Application
+Categories=Network;Chat;Security;
+Keywords=messenger;encrypted;tor;privacy;
