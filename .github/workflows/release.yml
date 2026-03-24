@@ -60,11 +60,12 @@ jobs:
       - name: Extract version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      - name: Create GitHub Release
+      - name: Create draft release with assets
         uses: softprops/action-gh-release@v2
+        id: create_release
         with:
           name: "op4 v${{ env.VERSION }}"
-          draft: false
+          draft: true
           prerelease: ${{ contains(env.VERSION, 'dev') || contains(env.VERSION, 'rc') || contains(env.VERSION, 'alpha') || contains(env.VERSION, 'beta') }}
           generate_release_notes: false
           body: |
@@ -114,3 +115,8 @@ jobs:
             op4-${{ env.VERSION }}-x86_64.AppImage.sha256
             op4-${{ env.VERSION }}.tar.gz
             op4-${{ env.VERSION }}.tar.gz.sha256
+
+      - name: Publish release
+        run: gh release edit "${{ github.ref_name }}" --draft=false --repo "${{ github.repository }}"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
