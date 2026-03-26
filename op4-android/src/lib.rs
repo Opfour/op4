@@ -29,13 +29,12 @@ fn android_main(app: android_activity::AndroidApp) {
     }
 
     // 2. Resolve app-private directories from the Android context.
-    //    android_activity provides internal_data_path and cache_dir.
+    //    android-activity 0.6 provides internal_data_path and external_data_path.
+    //    Use internal for data (vault, tor state), a subdirectory for cache.
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("/data/data/org.op4.messenger/files"));
-    let cache_dir = app
-        .external_cache_dir()
-        .unwrap_or_else(|| data_dir.join("cache"));
+    let cache_dir = data_dir.join("cache");
 
     let vault_path = op4_core::storage::get_vault_path_android(&data_dir);
 
