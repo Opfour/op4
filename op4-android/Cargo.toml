@@ -37,3 +37,6 @@ postcard = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 zeroize = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+android-activity = { version = "0.6", features = ["native-activity"] }

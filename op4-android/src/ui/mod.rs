@@ -5,9 +5,12 @@ mod passphrase;
 mod qr;
 mod settings;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use eframe::egui;
+use hkdf::Hkdf;
+use sha2::Sha256;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
@@ -82,6 +85,10 @@ pub struct Op4App {
     // Core state (populated after unlock)
     vault: Option<VaultUnlocked>,
     transport: Option<ArtiTransport>,
+    tokio_rt: Arc<tokio::runtime::Runtime>,
+    data_dir: std::path::PathBuf,
+    cache_dir: std::path::PathBuf,
+    transport_pending: Option<std::sync::mpsc::Receiver<Result<ArtiTransport, String>>>,
     // Contacts
     selected_contact: usize,
     contact_mode: ContactMode,
@@ -106,8 +113,18 @@ pub struct Op4App {
 }
 
 impl Op4App {
-    pub fn new(vault_path: std::path::PathBuf) -> Self {
+    pub fn new(
+        vault_path: std::path::PathBuf,
+        data_dir: std::path::PathBuf,
+        cache_dir: std::path::PathBuf,
+    ) -> Self {
         let is_new = !vault_path.exists();
+        let tokio_rt = Arc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("failed to create tokio runtime"),
+        );
         Self {
             screen: Screen::Passphrase,
             tab: Tab::Contacts,
@@ -118,6 +135,10 @@ impl Op4App {
             auth_error: String::new(),
             vault: None,
             transport: None,
+            tokio_rt,
+            data_dir,
+            cache_dir,
+            transport_pending: None,
             selected_contact: 0,
             contact_mode: ContactMode::List,
             add_contact_buf: String::new(),
@@ -164,10 +185,75 @@ impl Op4App {
             }
         }
     }
+
+    /// Derive a stable service nickname from the vault's identity secrets
+    /// and bootstrap the arti transport on the tokio runtime.
+    fn start_transport(&mut self) {
+        let vault = match self.vault.as_ref() {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Derive a deterministic service nickname from identity KEM secret
+        // so the same vault always produces the same onion address.
+        let nickname = {
+            let hk = Hkdf::<Sha256>::new(None, &vault.payload.identity_kem_secret);
+            let mut okm = [0u8; 16];
+            hk.expand(b"op4-onion-nickname", &mut okm)
+                .expect("16 bytes is valid");
+            // arti nicknames must be [a-z0-9_], 1-64 chars
+            let hex: String = okm.iter().map(|b| format!("{b:02x}")).collect();
+            format!("op4_{hex}")
+        };
+
+        let data_dir = self.data_dir.clone();
+        let cache_dir = self.cache_dir.clone();
+        let rt = Arc::clone(&self.tokio_rt);
+
+        self.status = "Connecting to Tor network...".into();
+
+        // Spawn transport init on a background thread so the UI stays responsive.
+        // When it completes, we store the result via a channel.
+        let (tx, rx) = std::sync::mpsc::channel::<Result<ArtiTransport, String>>();
+
+        std::thread::spawn(move || {
+            let result = rt.block_on(async {
+                ArtiTransport::init(&data_dir, &cache_dir, &nickname)
+                    .await
+                    .map_err(|e| format!("{e:?}"))
+            });
+            let _ = tx.send(result);
+        });
+
+        // Store the receiver so we can poll it in update()
+        self.transport_pending = Some(rx);
+    }
 }
 
 impl eframe::App for Op4App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Check if async transport init has completed
+        if let Some(ref rx) = self.transport_pending {
+            if let Ok(result) = rx.try_recv() {
+                match result {
+                    Ok(transport) => {
+                        // Set the nym_address so contacts know our onion addr
+                        if let Some(ref mut vault) = self.vault {
+                            vault.payload.nym_address = transport.address().to_owned();
+                            vault.save().ok();
+                        }
+                        self.status = format!("Connected: {}", transport.address());
+                        self.transport = Some(transport);
+                        self.refresh_codes();
+                    }
+                    Err(e) => {
+                        self.status = format!("Tor connection failed: {e}");
+                    }
+                }
+                self.transport_pending = None;
+            }
+        }
+
         // Poll transport for inbound messages (non-blocking)
         // Collect first to avoid double mutable borrow of self.
         let mut incoming_payloads = Vec::new();
