@@ -1,5 +1,8 @@
 use eframe::egui;
+use x25519_dalek::StaticSecret;
+use zeroize::Zeroizing;
 
+use op4_core::crypto::keys::{HybridKemKeypair, HybridSigningKeypair};
 use op4_core::storage::vault::VaultUnlocked;
 
 use super::{Op4App, Screen};
@@ -56,6 +59,7 @@ fn show_unlock(app: &mut Op4App, ui: &mut egui::Ui) {
                 } else {
                     app.vault = Some(vault);
                     app.refresh_codes();
+                    app.start_transport();
                     app.screen = Screen::Main;
                     app.status = "Vault unlocked.".into();
                 }
@@ -135,11 +139,25 @@ fn show_create(app: &mut Op4App, ui: &mut egui::Ui) {
                 app.passphrase_buf.as_bytes(),
                 app.duress_buf.as_bytes(),
             ) {
-                Ok(vault) => {
+                Ok(mut vault) => {
                     app.passphrase_buf.clear();
                     app.duress_buf.clear();
+
+                    // Generate identity keypairs (same as TUI create_new_vault)
+                    let kem_keypair = HybridKemKeypair::generate();
+                    let signing_keypair = HybridSigningKeypair::generate();
+                    let ratchet_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
+                    vault.payload.identity_kem_secret =
+                        Zeroizing::new(kem_keypair.to_bytes());
+                    vault.payload.identity_signing_secret =
+                        Zeroizing::new(signing_keypair.to_bytes());
+                    vault.payload.identity_ratchet_secret =
+                        Zeroizing::new(ratchet_secret.to_bytes().to_vec());
+                    vault.save().ok();
+
                     app.vault = Some(vault);
                     app.refresh_codes();
+                    app.start_transport();
                     app.screen = Screen::Main;
                     app.status = "Vault created.".into();
                 }
