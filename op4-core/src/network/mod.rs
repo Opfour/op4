@@ -5,11 +5,11 @@ pub mod message;
 pub struct IncomingMessage {
     /// Transport-specific sender tag (unused in Tor transport, reserved).
     pub sender_tag: Option<Vec<u8>>,
-    /// Raw payload bytes — a postcard-serialised `WireMessage`.
+    /// Raw payload bytes -- a postcard-serialised `WireMessage`.
     pub payload: Vec<u8>,
 }
 
-/// Abstract transport trait — implemented by each platform's network backend.
+/// Abstract transport trait -- implemented by each platform's network backend.
 ///
 /// - **op4-tui**: `NymClient` (Tor control port + SOCKS5 proxy)
 /// - **op4-android**: arti-based embedded Tor client
@@ -19,6 +19,15 @@ pub trait Transport: Send {
 
     /// Enqueue an encrypted payload for delivery to `recipient_addr`.
     fn send(&self, recipient_addr: &str, payload: Vec<u8>) -> Result<(), crate::error::NetworkError>;
+
+    /// Enqueue a payload and return a oneshot receiver that resolves to `true`
+    /// when the TCP connection succeeds or `false` on failure. Callers poll
+    /// the receiver non-blockingly to track delivery status.
+    fn send_with_confirm(
+        &self,
+        recipient_addr: &str,
+        payload: Vec<u8>,
+    ) -> Result<tokio::sync::oneshot::Receiver<bool>, crate::error::NetworkError>;
 
     /// Non-blocking poll for the next inbound message.
     fn try_recv_msg(&mut self) -> Option<IncomingMessage>;

@@ -37,7 +37,7 @@ use rand::Rng;
 use sha2::{Digest, Sha256, Sha512};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::{mpsc, oneshot, Semaphore};
 
 use op4_core::error::NetworkError;
 use op4_core::network::message::make_dummy_message;
@@ -63,15 +63,18 @@ const MAX_FRAME_BYTES: usize = 65_536;
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
+/// Outbound channel item: (recipient_addr, payload, optional delivery confirmation).
+type OutboundItem = (String, Vec<u8>, Option<oneshot::Sender<bool>>);
+
 /// Tor hidden-service transport.
 ///
 /// Keeps the same public interface as the former Nym SDK stub so nothing
 /// else in the codebase needs to change.
 pub struct NymClient {
-    /// Our `.onion` address, e.g. `"abc123…xyz.onion:14101"`.
+    /// Our `.onion` address, e.g. `"abc123...xyz.onion:14101"`.
     /// Share this in your `PublicKeyBundle` so contacts can reach you.
     pub address: String,
-    send_tx: mpsc::Sender<(String, Vec<u8>)>,
+    send_tx: mpsc::Sender<OutboundItem>,
     recv_rx: mpsc::UnboundedReceiver<IncomingMessage>,
     /// Sender side of the NEWNYM channel. The background `control_loop` task
     /// owns the Tor control socket and processes signals from this channel.
@@ -156,7 +159,7 @@ impl NymClient {
 
         // ── 5. Channels ───────────────────────────────────────────────────────
         let (recv_tx, recv_rx) = mpsc::unbounded_channel::<IncomingMessage>();
-        let (send_tx, send_rx) = mpsc::channel::<(String, Vec<u8>)>(64);
+        let (send_tx, send_rx) = mpsc::channel::<OutboundItem>(64);
         let (newnym_tx, newnym_rx) = mpsc::channel::<()>(4);
 
         // ── 6. Spawn background tasks ─────────────────────────────────────────
@@ -177,12 +180,26 @@ impl NymClient {
 
     /// Enqueue an encrypted wire message for delivery to `recipient_addr`.
     ///
-    /// Non-blocking: returns an error if the outbound queue is full.
-    /// The caller may retry; the payload must already be padded and encrypted.
+    /// Non-blocking fire-and-forget: returns an error if the outbound queue
+    /// is full. No delivery confirmation.
     pub fn send(&self, recipient_addr: &str, payload: Vec<u8>) -> Result<(), NetworkError> {
         self.send_tx
-            .try_send((recipient_addr.to_owned(), payload))
+            .try_send((recipient_addr.to_owned(), payload, None))
             .map_err(|e| NetworkError::NymSend(e.to_string()))
+    }
+
+    /// Enqueue a message and return a oneshot receiver for delivery status.
+    /// Resolves to `true` if the TCP write succeeded, `false` on failure.
+    pub fn send_with_confirm(
+        &self,
+        recipient_addr: &str,
+        payload: Vec<u8>,
+    ) -> Result<oneshot::Receiver<bool>, NetworkError> {
+        let (tx, rx) = oneshot::channel();
+        self.send_tx
+            .try_send((recipient_addr.to_owned(), payload, Some(tx)))
+            .map_err(|e| NetworkError::NymSend(e.to_string()))?;
+        Ok(rx)
     }
 
     /// Non-blocking poll for the next inbound message.
@@ -206,6 +223,14 @@ impl Transport for NymClient {
 
     fn send(&self, recipient_addr: &str, payload: Vec<u8>) -> Result<(), NetworkError> {
         NymClient::send(self, recipient_addr, payload)
+    }
+
+    fn send_with_confirm(
+        &self,
+        recipient_addr: &str,
+        payload: Vec<u8>,
+    ) -> Result<oneshot::Receiver<bool>, NetworkError> {
+        NymClient::send_with_confirm(self, recipient_addr, payload)
     }
 
     fn try_recv_msg(&mut self) -> Option<IncomingMessage> {
@@ -553,19 +578,26 @@ async fn inbound_loop(listener: TcpListener, recv_tx: mpsc::UnboundedSender<Inco
 }
 
 /// Drain the outbound send queue, opening a fresh SOCKS5 connection per message.
-async fn outbound_loop(mut send_rx: mpsc::Receiver<(String, Vec<u8>)>, socks_addr: String) {
-    while let Some((addr, payload)) = send_rx.recv().await {
+async fn outbound_loop(mut send_rx: mpsc::Receiver<OutboundItem>, socks_addr: String) {
+    while let Some((addr, payload, confirm_tx)) = send_rx.recv().await {
         let socks = socks_addr.clone();
         tokio::spawn(async move {
-            match socks5_connect(&socks, &addr).await {
+            let ok = match socks5_connect(&socks, &addr).await {
                 Ok(mut stream) => {
                     if let Err(e) = write_frame(&mut stream, &payload).await {
                         eprintln!("[op4] outbound write to {addr}: {e}");
+                        false
+                    } else {
+                        true
                     }
                 }
                 Err(e) => {
                     eprintln!("[op4] SOCKS5 connect to {addr}: {e}");
+                    false
                 }
+            };
+            if let Some(tx) = confirm_tx {
+                let _ = tx.send(ok);
             }
         });
     }
@@ -592,12 +624,12 @@ async fn control_loop(mut control: TcpStream, mut newnym_rx: mpsc::Receiver<()>)
 ///
 /// This ensures that an external observer always sees traffic flowing,
 /// making it harder to determine whether real messages are being exchanged.
-async fn cover_traffic_loop(own_address: String, send_tx: mpsc::Sender<(String, Vec<u8>)>) {
+async fn cover_traffic_loop(own_address: String, send_tx: mpsc::Sender<OutboundItem>) {
     loop {
         let interval_secs = sample_exponential(COVER_MEAN_SECS);
         tokio::time::sleep(Duration::from_secs_f64(interval_secs)).await;
         // try_send: drop silently if queue is full (cover traffic is best-effort)
-        let _ = send_tx.try_send((own_address.clone(), make_dummy_message()));
+        let _ = send_tx.try_send((own_address.clone(), make_dummy_message(), None));
     }
 }
 

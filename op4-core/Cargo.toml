@@ -1,6 +1,6 @@
 [package]
 name = "op4-core"
-version = "0.2.0-dev"
+version = "0.3.0-dev"
 edition = "2021"
 rust-version = "1.88"
 publish = false
@@ -39,6 +39,9 @@ qrcode           = "0.14"
 
 # Passphrase strength
 zxcvbn           = "3.1.0"
+
+# Async primitives (oneshot channels for delivery confirmation)
+tokio            = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
@@ -21,7 +22,8 @@ use op4_core::crypto::ratchet::{MessageHeader, RatchetState};
 use op4_core::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use op4_core::identity::revocation::{RevocationCertificate, RevocationReason};
 use op4_core::network::message::{WireMessage, WireMessageType};
-use op4_core::storage::vault::{StoredMessage, VaultUnlocked};
+use op4_core::storage::vault::{PendingOutbound, StoredMessage, VaultUnlocked};
+use tokio::sync::oneshot;
 use crate::network::nym_client::NymClient;
 use crate::ui::{
     contacts::{render_contacts, render_fingerprint_panel, render_key_change_alert},
@@ -41,6 +43,15 @@ use zeroize::Zeroizing;
 /// Each entry requires an ML-KEM decapsulation (expensive); capping prevents
 /// memory exhaustion and CPU amplification from a handshake-flood DoS.
 const MAX_PENDING_HANDSHAKES: usize = 10;
+
+/// How often (in 100ms ticks) the outbox retry loop runs (~5 seconds).
+const OUTBOX_RETRY_INTERVAL: u64 = 50;
+
+/// Maximum retry attempts before an outbox entry is pruned.
+const OUTBOX_MAX_RETRIES: u32 = 200;
+
+/// Maximum vault sequence gap before an outbox entry is pruned.
+const OUTBOX_MAX_SEQ_GAP: u64 = 50_000;
 
 // ─── State Types ──────────────────────────────────────────────────────────────
 
@@ -68,6 +79,7 @@ enum ContactMode {
 enum SettingsEditMode {
     None,
     EditTorAddr,
+    EditNymGateway,
     EditAutoDelete,
     ConfirmRotate,
     ConfirmRevoke,
@@ -146,6 +158,14 @@ struct AppState {
     settings_edit_buf: String,
     // Status bar
     status: String,
+    // Outbox retry state (not persisted -- rebuilt each session)
+    retry_tick: u64,
+    /// In-flight delivery confirmations: (outbox index, oneshot receiver).
+    pending_confirms: Vec<(usize, oneshot::Receiver<bool>)>,
+    /// Per-contact backoff: contact_id -> tick at which retry is allowed.
+    backoff_until: HashMap<[u8; 32], u64>,
+    /// Indices of outbox entries currently in flight (avoid double-send).
+    in_flight: Vec<usize>,
 }
 
 impl AppState {
@@ -176,6 +196,10 @@ impl AppState {
             settings_edit_mode: SettingsEditMode::None,
             settings_edit_buf: String::new(),
             status: contacts_help(0),
+            retry_tick: 0,
+            pending_confirms: Vec::new(),
+            backoff_until: HashMap::new(),
+            in_flight: Vec::new(),
         }
     }
 }
@@ -207,6 +231,10 @@ pub fn run<B: ratatui::backend::Backend>(
     let export_code = build_export_code(&vault);
     let bootstrap_code = build_bootstrap_code(&vault);
     let mut app = AppState::new(export_code, bootstrap_code);
+
+    // Prune expired outbox entries and retry any queued from previous session.
+    prune_outbox(&mut vault);
+    flush_outbox(&mut app, &mut vault, nym);
 
     loop {
         // Reload messages if the active contact changed.
@@ -247,6 +275,15 @@ pub fn run<B: ratatui::backend::Backend>(
         // Non-blocking poll for inbound messages.
         while let Some(incoming) = nym.try_recv_msg() {
             handle_incoming_message(&mut app, &mut vault, nym, &incoming.payload);
+        }
+
+        // Poll pending delivery confirmations (non-blocking).
+        drain_pending_confirms(&mut app, &mut vault);
+
+        // Periodically retry queued outbox messages.
+        app.retry_tick += 1;
+        if app.retry_tick % OUTBOX_RETRY_INTERVAL == 0 {
+            flush_outbox(&mut app, &mut vault, nym);
         }
 
         if !app.running {
@@ -620,6 +657,24 @@ fn draw_settings_edit_popup(f: &mut Frame, app: &AppState, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .title("Edit Tor SOCKS5 Address"),
+            );
+            f.render_widget(content, popup);
+        }
+        SettingsEditMode::EditNymGateway => {
+            let content = Paragraph::new(vec![
+                Line::from("Enter Nym gateway address (leave blank for auto-selection):"),
+                Line::from(""),
+                Line::from(Span::styled(
+                    app.settings_edit_buf.as_str(),
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(""),
+                Line::from("Enter:save  Esc:cancel"),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title("Edit Nym Gateway"),
             );
             f.render_widget(content, popup);
         }
@@ -1138,6 +1193,32 @@ fn handle_settings_key(
             }
             return;
         }
+        SettingsEditMode::EditNymGateway => {
+            match key.code {
+                KeyCode::Esc => {
+                    app.settings_edit_mode = SettingsEditMode::None;
+                    app.settings_edit_buf.clear();
+                    app.status = "↑↓:navigate  Enter:select  1:contacts  q:quit".into();
+                }
+                KeyCode::Enter => {
+                    let val = app.settings_edit_buf.trim().to_owned();
+                    vault.payload.settings.nym_gateway =
+                        if val.is_empty() { None } else { Some(val) };
+                    vault.save().ok();
+                    app.status = "Nym gateway updated.".into();
+                    app.settings_edit_mode = SettingsEditMode::None;
+                    app.settings_edit_buf.clear();
+                }
+                KeyCode::Backspace => {
+                    app.settings_edit_buf.pop();
+                }
+                KeyCode::Char(c) => {
+                    app.settings_edit_buf.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
         SettingsEditMode::EditAutoDelete => {
             match key.code {
                 KeyCode::Esc => {
@@ -1211,6 +1292,18 @@ fn handle_settings_key(
                 app.settings_edit_buf = vault.payload.settings.tor_socks_addr.clone();
                 app.settings_edit_mode = SettingsEditMode::EditTorAddr;
                 app.status = "Edit Tor address. Enter:save  Esc:cancel".into();
+            }
+            1 => {
+                // Edit Nym gateway
+                app.settings_edit_buf = vault
+                    .payload
+                    .settings
+                    .nym_gateway
+                    .clone()
+                    .unwrap_or_default();
+                app.settings_edit_mode = SettingsEditMode::EditNymGateway;
+                app.status =
+                    "Enter Nym gateway address (blank=auto). Enter:save  Esc:cancel".into();
             }
             2 => {
                 // Edit auto-delete threshold
@@ -1431,26 +1524,195 @@ fn send_message(
             .expect("WireMessage serialization cannot fail");
     }
 
-    // Transmit.
-    match nym.send(&contact_addr, wire_payload) {
-        Ok(()) => {
-            let text = sanitize_for_display(&String::from_utf8_lossy(plaintext));
-            // Persist to vault message log.
-            let mut msgs = vault.load_messages(&contact_id);
-            let counter = msgs.len() as u64 + 1;
-            msgs.push(StoredMessage {
-                counter,
-                content: text,
-                from_us: true,
-            });
-            vault.save_messages(&contact_id, &msgs).ok();
-            app.messages = msgs;
-            app.status = "Message sent.".into();
-            vault.save().ok();
+    // Persist message log, ratchet state, and outbox entry atomically.
+    let text = sanitize_for_display(&String::from_utf8_lossy(plaintext));
+    let mut msgs = vault.load_messages(&contact_id);
+    let counter = msgs.len() as u64 + 1;
+    msgs.push(StoredMessage {
+        counter,
+        content: text,
+        from_us: true,
+    });
+    vault.save_messages(&contact_id, &msgs).ok();
+
+    // Queue in the outbox (persisted so it survives crashes/restarts).
+    let outbox_idx = vault.payload.outbox.len();
+    vault.payload.outbox.push(PendingOutbound {
+        contact_id,
+        recipient_addr: contact_addr.clone(),
+        wire_payload: wire_payload.clone(),
+        retry_count: 0,
+        created_seq: vault.payload.sequence,
+    });
+
+    app.messages = msgs;
+    vault.save().ok();
+
+    // Attempt immediate delivery (best-effort, non-blocking).
+    match nym.send_with_confirm(&contact_addr, wire_payload) {
+        Ok(rx) => {
+            app.pending_confirms.push((outbox_idx, rx));
+            app.in_flight.push(outbox_idx);
         }
-        Err(e) => {
-            app.status = format!("Send failed: {e:?}");
+        Err(_) => {
+            // Will be retried by flush_outbox.
         }
+    }
+
+    let pending = vault.payload.outbox.len();
+    if pending > 1 {
+        app.status = format!("Queued. ({pending} pending)");
+    } else {
+        app.status = "Queued.".into();
+    }
+}
+
+// ─── Outbox Retry ────────────────────────────────────────────────────────────
+
+/// Remove outbox entries that have exceeded retry or age limits.
+fn prune_outbox(vault: &mut VaultUnlocked) {
+    let seq = vault.payload.sequence;
+    let before = vault.payload.outbox.len();
+    vault.payload.outbox.retain(|entry| {
+        entry.retry_count < OUTBOX_MAX_RETRIES
+            && seq.saturating_sub(entry.created_seq) < OUTBOX_MAX_SEQ_GAP
+    });
+    if vault.payload.outbox.len() < before {
+        vault.save().ok();
+    }
+}
+
+/// Attempt to deliver the first pending outbox message per contact.
+/// Respects per-contact backoff and avoids double-sending in-flight entries.
+fn flush_outbox(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient) {
+    if vault.payload.outbox.is_empty() {
+        return;
+    }
+
+    // Collect the first pending entry per contact that is not in flight
+    // and whose backoff has expired.
+    let mut seen_contacts: HashMap<[u8; 32], bool> = HashMap::new();
+    let mut to_send: Vec<(usize, String, Vec<u8>)> = Vec::new();
+
+    for (idx, entry) in vault.payload.outbox.iter().enumerate() {
+        // Only take the first entry per contact (FIFO ordering).
+        if seen_contacts.contains_key(&entry.contact_id) {
+            continue;
+        }
+        seen_contacts.insert(entry.contact_id, true);
+
+        // Skip if already in flight.
+        if app.in_flight.contains(&idx) {
+            continue;
+        }
+
+        // Skip if backoff hasn't expired.
+        if let Some(&until) = app.backoff_until.get(&entry.contact_id) {
+            if app.retry_tick < until {
+                continue;
+            }
+        }
+
+        to_send.push((idx, entry.recipient_addr.clone(), entry.wire_payload.clone()));
+    }
+
+    for (idx, addr, payload) in to_send {
+        match nym.send_with_confirm(&addr, payload) {
+            Ok(rx) => {
+                app.pending_confirms.push((idx, rx));
+                app.in_flight.push(idx);
+            }
+            Err(_) => {
+                // Queue full -- will retry next interval.
+            }
+        }
+    }
+}
+
+/// Poll in-flight delivery confirmations and update outbox accordingly.
+fn drain_pending_confirms(app: &mut AppState, vault: &mut VaultUnlocked) {
+    if app.pending_confirms.is_empty() {
+        return;
+    }
+
+    let mut delivered: Vec<usize> = Vec::new();
+    let mut failed: Vec<usize> = Vec::new();
+
+    // Drain completed confirms.
+    let mut remaining = Vec::new();
+    for (idx, mut rx) in app.pending_confirms.drain(..) {
+        match rx.try_recv() {
+            Ok(true) => delivered.push(idx),
+            Ok(false) => failed.push(idx),
+            Err(oneshot::error::TryRecvError::Empty) => {
+                // Still in flight.
+                remaining.push((idx, rx));
+            }
+            Err(oneshot::error::TryRecvError::Closed) => {
+                // Sender dropped (task panicked or was cancelled). Treat as failure.
+                failed.push(idx);
+            }
+        }
+    }
+    app.pending_confirms = remaining;
+
+    // Remove in-flight markers for completed entries.
+    for idx in delivered.iter().chain(failed.iter()) {
+        app.in_flight.retain(|i| i != idx);
+    }
+
+    // Process failures: increment retry count, set backoff.
+    for idx in &failed {
+        if let Some(entry) = vault.payload.outbox.get_mut(*idx) {
+            entry.retry_count += 1;
+            // Exponential backoff: 2^retry_count ticks, capped at 600 (~60 seconds).
+            let delay = std::cmp::min(1u64 << entry.retry_count.min(30), 600);
+            app.backoff_until
+                .insert(entry.contact_id, app.retry_tick + delay);
+        }
+    }
+
+    // Process deliveries: remove from outbox (in reverse order to preserve indices).
+    if !delivered.is_empty() {
+        // Sort descending so removal doesn't shift lower indices.
+        delivered.sort_unstable_by(|a, b| b.cmp(a));
+        for idx in &delivered {
+            if *idx < vault.payload.outbox.len() {
+                vault.payload.outbox.remove(*idx);
+            }
+        }
+        // Rebase in-flight and pending_confirms indices after removal.
+        rebase_outbox_indices(app, &delivered);
+        vault.save().ok();
+
+        let pending = vault.payload.outbox.len();
+        if pending > 0 {
+            app.status = format!("Delivered. ({pending} pending)");
+        } else {
+            app.status = "Delivered.".into();
+        }
+    }
+
+    if !failed.is_empty() && delivered.is_empty() {
+        // Only save on failure if retries changed (avoids excessive I/O).
+        vault.save().ok();
+    }
+}
+
+/// After removing outbox entries, adjust all tracked indices so they still
+/// point at the correct entries.
+fn rebase_outbox_indices(app: &mut AppState, removed: &[usize]) {
+    // `removed` is sorted descending. For each tracked index, count how many
+    // removed indices are below it and subtract that count.
+    let rebase = |idx: &mut usize| {
+        let shift = removed.iter().filter(|&&r| r < *idx).count();
+        *idx -= shift;
+    };
+    for (idx, _) in &mut app.pending_confirms {
+        rebase(idx);
+    }
+    for idx in &mut app.in_flight {
+        rebase(idx);
     }
 }
 
