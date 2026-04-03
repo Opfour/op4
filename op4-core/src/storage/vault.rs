@@ -315,7 +315,12 @@ impl VaultUnlocked {
     /// Save the vault atomically (tmp file + rename).
     /// The duress section is preserved unchanged so the duress passphrase
     /// continues to work across saves.
-    pub fn save(&self) -> Result<(), VaultError> {
+    ///
+    /// Increments the sequence counter and writes a rollback-detection marker
+    /// file (`<vault_path>.seq`) containing `sequence || HMAC(master_key, sequence)`.
+    /// The marker lets `unlock` detect if the vault was replaced with an older copy.
+    pub fn save(&mut self) -> Result<(), VaultError> {
+        self.payload.sequence += 1;
         let vault_bytes = build_vault_file(
             &self.normal_salt,
             &self.duress_salt,
@@ -323,7 +328,19 @@ impl VaultUnlocked {
             &self.payload,
             self.duress_ct.clone(),
         )?;
-        write_atomic(&self.path, &vault_bytes)
+        write_atomic(&self.path, &vault_bytes)?;
+        write_sequence_marker(&self.path, &self.master_key, self.payload.sequence);
+        Ok(())
+    }
+
+    /// Check if the vault's sequence counter is consistent with the rollback
+    /// marker file. Returns `true` if the vault may have been rolled back
+    /// (sequence is lower than the marker), `false` if OK or no marker exists.
+    pub fn check_rollback(&self) -> bool {
+        match read_sequence_marker(&self.path, &self.master_key) {
+            Some(marker_seq) => self.payload.sequence < marker_seq,
+            None => false, // no marker = first run or marker deleted
+        }
     }
 }
 
@@ -465,6 +482,41 @@ fn write_atomic(path: &Path, data: &[u8]) -> Result<(), VaultError> {
     Ok(())
 }
 
+/// Path of the rollback-detection marker file for a given vault path.
+fn seq_marker_path(vault_path: &Path) -> PathBuf {
+    vault_path.with_extension("seq")
+}
+
+/// Write `sequence (8 bytes LE) || HMAC-SHA256(master_key, sequence)` to the
+/// marker file. Best-effort: failure is logged but does not block the save.
+fn write_sequence_marker(vault_path: &Path, key: &SymKey, sequence: u64) {
+    use crate::crypto::primitives::hmac_sign_raw;
+    let seq_bytes = sequence.to_le_bytes();
+    let mac = hmac_sign_raw(&key.0, &seq_bytes);
+    let mut data = Vec::with_capacity(8 + 32);
+    data.extend_from_slice(&seq_bytes);
+    data.extend_from_slice(&mac);
+    // Best-effort write -- failure doesn't block vault save.
+    let _ = fs::write(seq_marker_path(vault_path), &data);
+}
+
+/// Read and verify the sequence marker. Returns `Some(sequence)` if the marker
+/// exists and has a valid HMAC, `None` if missing, corrupt, or forged.
+fn read_sequence_marker(vault_path: &Path, key: &SymKey) -> Option<u64> {
+    use crate::crypto::primitives::hmac_verify_raw;
+    let data = fs::read(seq_marker_path(vault_path)).ok()?;
+    if data.len() != 40 {
+        return None; // 8 (seq) + 32 (HMAC)
+    }
+    let seq_bytes: [u8; 8] = data[..8].try_into().ok()?;
+    let mac: [u8; 32] = data[8..40].try_into().ok()?;
+    if hmac_verify_raw(&key.0, &seq_bytes, &mac) {
+        Some(u64::from_le_bytes(seq_bytes))
+    } else {
+        None // forged or wrong key
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,11 +589,11 @@ mod tests {
         let mut vault = create_test_vault(&path, b"pass", b"duress");
         vault.payload.nym_address = "onion_addr".into();
         vault.payload.sequence = 42;
-        vault.save().unwrap();
+        vault.save().unwrap(); // save() auto-increments sequence to 43
 
         let reloaded = unlock_test_vault(&path, b"pass").unwrap();
         assert_eq!(reloaded.payload.nym_address, "onion_addr");
-        assert_eq!(reloaded.payload.sequence, 42);
+        assert_eq!(reloaded.payload.sequence, 43);
     }
 
     #[test]
@@ -566,6 +618,46 @@ mod tests {
         let raw = fs::read(&path).unwrap();
         assert_eq!(&raw[..4], b"OP4V");
         assert_eq!(raw[4], 2, "VAULT_VERSION must be 2");
+    }
+
+    #[test]
+    fn rollback_detection_catches_stale_vault() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+
+        let mut vault = create_test_vault(&path, b"pass", b"duress");
+        vault.save().unwrap(); // seq 1
+        vault.save().unwrap(); // seq 2
+
+        // Snapshot the vault file at seq 2
+        let snapshot = fs::read(&path).unwrap();
+
+        vault.save().unwrap(); // seq 3 -- marker file now says 3
+
+        // Restore the old snapshot (seq 2) -- simulates rollback
+        fs::write(&path, &snapshot).unwrap();
+
+        let rolled_back = unlock_test_vault(&path, b"pass").unwrap();
+        assert!(
+            rolled_back.check_rollback(),
+            "vault at seq 2 with marker at seq 3 should be detected as rollback"
+        );
+    }
+
+    #[test]
+    fn no_rollback_on_normal_use() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+
+        let mut vault = create_test_vault(&path, b"pass", b"duress");
+        vault.save().unwrap();
+        vault.save().unwrap();
+
+        let reloaded = unlock_test_vault(&path, b"pass").unwrap();
+        assert!(
+            !reloaded.check_rollback(),
+            "normal save/unlock cycle should not trigger rollback"
+        );
     }
 
     #[test]
