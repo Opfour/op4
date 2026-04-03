@@ -28,18 +28,55 @@ pub fn read_secret_from_tty(prompt: &str) -> io::Result<String> {
     }
 
     let mut input = String::new();
-    let mut buf = [0u8; 1];
+    let mut byte = [0u8; 1];
+    // Buffer for accumulating multi-byte UTF-8 sequences (max 4 bytes).
+    let mut utf8_buf = [0u8; 4];
+    let mut utf8_len: usize = 0;
     loop {
-        match tty.read(&mut buf) {
+        match tty.read(&mut byte) {
             Ok(0) => break,
             Ok(_) => {
-                if buf[0] == b'\n' || buf[0] == b'\r' {
+                if byte[0] == b'\n' || byte[0] == b'\r' {
                     break;
                 }
-                // Reject non-UTF8 bytes silently (prevents injection via terminal sequences)
-                if let Ok(ch) = std::str::from_utf8(&buf) {
-                    input.push_str(ch);
+
+                if utf8_len == 0 {
+                    // Start of a new character.
+                    if byte[0] < 0x80 {
+                        // ASCII: single byte, push directly.
+                        input.push(byte[0] as char);
+                        continue;
+                    }
+                    // Leading byte of a multi-byte sequence.
+                    utf8_buf[0] = byte[0];
+                    utf8_len = 1;
+                } else {
+                    // Continuation byte expected (0x80..0xBF).
+                    if byte[0] & 0xC0 != 0x80 {
+                        // Not a valid continuation -- discard the
+                        // incomplete sequence and re-evaluate this byte.
+                        utf8_len = 0;
+                        if byte[0] < 0x80 {
+                            input.push(byte[0] as char);
+                        } else {
+                            utf8_buf[0] = byte[0];
+                            utf8_len = 1;
+                        }
+                        continue;
+                    }
+                    utf8_buf[utf8_len] = byte[0];
+                    utf8_len += 1;
                 }
+
+                // Check if we have a complete UTF-8 character.
+                if let Ok(s) = std::str::from_utf8(&utf8_buf[..utf8_len]) {
+                    input.push_str(s);
+                    utf8_len = 0;
+                } else if utf8_len >= 4 {
+                    // 4 bytes and still invalid -- discard.
+                    utf8_len = 0;
+                }
+                // Otherwise keep accumulating continuation bytes.
             }
             Err(e) => {
                 // Restore echo before propagating error

@@ -937,7 +937,6 @@ fn handle_contacts_key(
                     match ContactCode::decode(&code_str) {
                         Ok(code) => {
                             let seq = vault.payload.sequence;
-                            vault.payload.sequence += 1;
                             let label = format!("Contact {}", vault.payload.contacts.len() + 1);
                             let contact = StoredContact::new(code.0, label, seq);
                             vault.payload.contacts.push(contact);
@@ -1016,7 +1015,6 @@ fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked) {
 
     // Add the contact.
     let seq = vault.payload.sequence;
-    vault.payload.sequence += 1;
     let contact = StoredContact::new(pending.bundle, name.clone(), seq);
     let contact_id = contact.id;
     vault.payload.contacts.push(contact);
@@ -2224,7 +2222,6 @@ fn handle_inbound_bundle_response(
 
     // Add the contact with a default name (user can rename later).
     let seq = vault.payload.sequence;
-    vault.payload.sequence += 1;
     let label = format!("Contact {}", vault.payload.contacts.len() + 1);
     let contact = StoredContact::new(bundle, label.clone(), seq);
     vault.payload.contacts.push(contact);
@@ -2286,7 +2283,6 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
 
     // Sign revocation cert with OLD key so contacts can verify it.
     let seq = vault.payload.sequence;
-    vault.payload.sequence += 1;
     let cert = RevocationCertificate::create(
         &old_signing,
         old_fp,
@@ -2360,7 +2356,6 @@ fn revoke_key(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClient
     let old_fp = old_bundle.fingerprint();
 
     let seq = vault.payload.sequence;
-    vault.payload.sequence += 1;
     let cert = RevocationCertificate::create(
         &old_signing,
         old_fp,

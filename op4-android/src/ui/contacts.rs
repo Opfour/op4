@@ -189,7 +189,6 @@ fn show_add_contact(app: &mut Op4App, ui: &mut egui::Ui) {
                     Ok(code) => {
                         let vault = app.vault.as_mut().unwrap();
                         let seq = vault.payload.sequence;
-                        vault.payload.sequence += 1;
                         let label =
                             format!("Contact {}", vault.payload.contacts.len() + 1);
                         let contact = StoredContact::new(code.0, label, seq);
@@ -279,7 +278,6 @@ fn accept_pending(app: &mut Op4App) {
 
     let vault = app.vault.as_mut().unwrap();
     let seq = vault.payload.sequence;
-    vault.payload.sequence += 1;
     let contact = StoredContact::new(pending.bundle, name.clone(), seq);
     let contact_id = contact.id;
     vault.payload.contacts.push(contact);
