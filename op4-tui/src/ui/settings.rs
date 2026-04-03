@@ -7,17 +7,6 @@ use ratatui::{
 
 use op4_core::storage::vault::AppSettings;
 
-/// Settings menu items.
-pub enum SettingsItem {
-    TorAddress,
-    NymGateway,
-    AutoDelete,
-    RotateKey,
-    RevokeKey,
-    ExportContactCode,
-    RefreshCircuit,
-}
-
 pub fn render_settings(
     f: &mut Frame,
     settings: &AppSettings,

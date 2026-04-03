@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod hardening;
 mod network;
 mod ui;

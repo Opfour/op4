@@ -312,4 +312,86 @@ mod tests {
         // Either the MAC check or AEAD decryption must reject this
         assert!(perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).is_err());
     }
+
+    /// Full integration: handshake -> ratchet init -> multi-message bidirectional
+    /// exchange -> ratchet advancement -> persistence roundtrip.
+    #[test]
+    fn handshake_to_ratchet_full_flow() {
+        use crate::crypto::ratchet::RatchetState;
+        use crate::crypto::primitives::SymKey;
+
+        // ── 1. Generate identities ──────────────────────────────────────
+        let (bob_kem, _bob_signing, bob_ratchet_secret, bob_bundle) = make_bob();
+        let alice_kem = HybridKemKeypair::generate();
+        let alice_signing = HybridSigningKeypair::generate();
+        let alice_ratchet_pub = X25519PublicKey::from(&bob_ratchet_secret).to_bytes();
+
+        // ── 2. Alice initiates handshake ────────────────────────────────
+        let (hs_msg, alice_sk) = perform_handshake_alice(
+            &alice_kem,
+            &alice_signing,
+            alice_ratchet_pub,
+            "alice_addr".into(),
+            &bob_bundle,
+            b"hello from alice",
+        )
+        .unwrap();
+
+        // ── 3. Bob completes handshake ──────────────────────────────────
+        let (initial_plaintext, bob_sk) =
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &hs_msg).unwrap();
+        assert_eq!(initial_plaintext, b"hello from alice");
+        assert_eq!(alice_sk.0, bob_sk.0);
+
+        // ── 4. Initialize Double Ratchets ───────────────────────────────
+        let bob_ratchet_pub_key = X25519PublicKey::from(&bob_ratchet_secret);
+        let mut alice_ratchet =
+            RatchetState::init_alice(alice_sk.0, bob_ratchet_pub_key).unwrap();
+        let mut bob_ratchet =
+            RatchetState::init_bob(bob_sk.0, bob_ratchet_secret);
+
+        // ── 5. Alice sends multiple messages to Bob ─────────────────────
+        for i in 0..5 {
+            let msg = format!("alice msg {i}");
+            let (header, ct, _mac_key) =
+                alice_ratchet.ratchet_encrypt(msg.as_bytes()).unwrap();
+            let (pt, _mk) = bob_ratchet.ratchet_decrypt(&header, &ct).unwrap();
+            assert_eq!(pt, msg.as_bytes());
+        }
+
+        // ── 6. Bob replies (triggers DH ratchet step) ───────────────────
+        for i in 0..3 {
+            let msg = format!("bob reply {i}");
+            let (header, ct, _mac_key) =
+                bob_ratchet.ratchet_encrypt(msg.as_bytes()).unwrap();
+            let (pt, _mk) = alice_ratchet.ratchet_decrypt(&header, &ct).unwrap();
+            assert_eq!(pt, msg.as_bytes());
+        }
+
+        // ── 7. Interleaved exchange (multiple ratchet steps) ────────────
+        let (h, c, _) = alice_ratchet.ratchet_encrypt(b"ping").unwrap();
+        let (pt, _) = bob_ratchet.ratchet_decrypt(&h, &c).unwrap();
+        assert_eq!(pt, b"ping");
+
+        let (h, c, _) = bob_ratchet.ratchet_encrypt(b"pong").unwrap();
+        let (pt, _) = alice_ratchet.ratchet_decrypt(&h, &c).unwrap();
+        assert_eq!(pt, b"pong");
+
+        let (h, c, _) = alice_ratchet.ratchet_encrypt(b"final").unwrap();
+        let (pt, _) = bob_ratchet.ratchet_decrypt(&h, &c).unwrap();
+        assert_eq!(pt, b"final");
+
+        // ── 8. Persistence roundtrip ────────────────────────────────────
+        let key = SymKey([0xABu8; 32]);
+        let alice_ct = alice_ratchet.to_encrypted_bytes(&key).unwrap();
+        let mut alice_restored =
+            RatchetState::from_encrypted_bytes(&key, &alice_ct).unwrap();
+
+        // The restored ratchet must be able to decrypt a new message from Bob.
+        let (h, c, _) = bob_ratchet.ratchet_encrypt(b"after restore").unwrap();
+        let (pt, _) = alice_restored
+            .ratchet_decrypt(&h, &c)
+            .expect("restored ratchet must decrypt");
+        assert_eq!(pt, b"after restore");
+    }
 }

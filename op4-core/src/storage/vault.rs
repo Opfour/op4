@@ -124,14 +124,24 @@ impl VaultUnlocked {
         normal_passphrase: &[u8],
         duress_passphrase: &[u8],
     ) -> Result<Self, VaultError> {
+        Self::create_with_params(path, normal_passphrase, duress_passphrase, &Argon2Params::default())
+    }
+
+    /// Create a new vault with explicit Argon2 parameters.
+    /// Use `Argon2Params::default()` for production and fast params for tests.
+    pub fn create_with_params(
+        path: &Path,
+        normal_passphrase: &[u8],
+        duress_passphrase: &[u8],
+        params: &Argon2Params,
+    ) -> Result<Self, VaultError> {
         let mut normal_salt = [0u8; SALT_LEN];
         let mut duress_salt = [0u8; SALT_LEN];
         OsRng.fill_bytes(&mut normal_salt);
         OsRng.fill_bytes(&mut duress_salt);
 
-        let params = Argon2Params::default();
-        let normal_key = argon2id_derive(normal_passphrase, &normal_salt, &params)?;
-        let duress_key = argon2id_derive(duress_passphrase, &duress_salt, &params)?;
+        let normal_key = argon2id_derive(normal_passphrase, &normal_salt, params)?;
+        let duress_key = argon2id_derive(duress_passphrase, &duress_salt, params)?;
 
         let payload = VaultPayload::default();
         let duress_payload = VaultPayload {
@@ -169,12 +179,20 @@ impl VaultUnlocked {
     /// Unlock an existing vault. Tries normal key first, then duress key.
     /// Always tries both before returning an error (timing side-channel prevention).
     pub fn unlock(path: &Path, passphrase: &[u8]) -> Result<Self, VaultError> {
+        Self::unlock_with_params(path, passphrase, &Argon2Params::default())
+    }
+
+    /// Unlock with explicit Argon2 parameters (must match those used at creation).
+    pub fn unlock_with_params(
+        path: &Path,
+        passphrase: &[u8],
+        params: &Argon2Params,
+    ) -> Result<Self, VaultError> {
         let data = fs::read(path)?;
         let header = parse_header(&data)?;
 
-        let params = Argon2Params::default();
-        let normal_key = argon2id_derive(passphrase, &header.normal_salt, &params)?;
-        let duress_key = argon2id_derive(passphrase, &header.duress_salt, &params)?;
+        let normal_key = argon2id_derive(passphrase, &header.normal_salt, params)?;
+        let duress_key = argon2id_derive(passphrase, &header.duress_salt, params)?;
 
         let normal_result = try_decrypt_section(&data, &normal_key, &header, false);
         let duress_result = try_decrypt_section(&data, &duress_key, &header, true);
@@ -452,91 +470,99 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    // All vault tests use Argon2id at 64 MiB / 3 iterations (the production
-    // default).  Each create+unlock pair takes several seconds.  Run them
-    // explicitly with:
-    //   cargo test --bin op4 storage::vault -- --include-ignored
-    //
-    // They are characterisation tests: they document current behaviour without
-    // changing it.
+    use crate::crypto::primitives::Argon2Params;
+
+    /// Fast Argon2 params for tests (1 MiB, 1 iteration). Production uses
+    /// 64 MiB / 3 iterations. These are NOT secure -- test use only.
+    fn test_params() -> Argon2Params {
+        Argon2Params {
+            m_cost: 1024,
+            t_cost: 1,
+            p_cost: 1,
+        }
+    }
+
+    fn create_test_vault(
+        path: &std::path::Path,
+        normal: &[u8],
+        duress: &[u8],
+    ) -> VaultUnlocked {
+        VaultUnlocked::create_with_params(path, normal, duress, &test_params()).unwrap()
+    }
+
+    fn unlock_test_vault(path: &std::path::Path, pass: &[u8]) -> Result<VaultUnlocked, VaultError> {
+        VaultUnlocked::unlock_with_params(path, pass, &test_params())
+    }
 
     #[test]
-    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
     fn create_and_unlock_normal() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vault.op4");
 
-        VaultUnlocked::create(&path, b"normal-pass", b"duress-pass").unwrap();
-        let v = VaultUnlocked::unlock(&path, b"normal-pass").unwrap();
+        create_test_vault(&path, b"normal-pass", b"duress-pass");
+        let v = unlock_test_vault(&path, b"normal-pass").unwrap();
 
         assert!(!v.is_duress);
         assert!(v.payload.contacts.is_empty());
     }
 
     #[test]
-    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
     fn create_and_unlock_duress() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vault.op4");
 
-        VaultUnlocked::create(&path, b"normal-pass", b"duress-pass").unwrap();
-        let v = VaultUnlocked::unlock(&path, b"duress-pass").unwrap();
+        create_test_vault(&path, b"normal-pass", b"duress-pass");
+        let v = unlock_test_vault(&path, b"duress-pass").unwrap();
 
         assert!(v.is_duress);
-        // The duress payload has the sentinel address set in VaultUnlocked::create
         assert_eq!(v.payload.nym_address, "[duress]");
     }
 
     #[test]
-    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
     fn wrong_passphrase_returns_invalid_passphrase() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vault.op4");
 
-        VaultUnlocked::create(&path, b"correct", b"duress").unwrap();
-        let result = VaultUnlocked::unlock(&path, b"wrong");
+        create_test_vault(&path, b"correct", b"duress");
+        let result = unlock_test_vault(&path, b"wrong");
 
         assert!(matches!(result, Err(VaultError::InvalidPassphrase)));
     }
 
     #[test]
-    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
     fn save_persists_payload_fields() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vault.op4");
 
-        let mut vault = VaultUnlocked::create(&path, b"pass", b"duress").unwrap();
+        let mut vault = create_test_vault(&path, b"pass", b"duress");
         vault.payload.nym_address = "onion_addr".into();
         vault.payload.sequence = 42;
         vault.save().unwrap();
 
-        let reloaded = VaultUnlocked::unlock(&path, b"pass").unwrap();
+        let reloaded = unlock_test_vault(&path, b"pass").unwrap();
         assert_eq!(reloaded.payload.nym_address, "onion_addr");
         assert_eq!(reloaded.payload.sequence, 42);
     }
 
     #[test]
-    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
     fn duress_passphrase_still_works_after_normal_save() {
-        // Saving with the normal key must not corrupt the duress section
         let dir = tempdir().unwrap();
         let path = dir.path().join("vault.op4");
 
-        let mut vault = VaultUnlocked::create(&path, b"normal", b"duress").unwrap();
+        let mut vault = create_test_vault(&path, b"normal", b"duress");
         vault.payload.sequence = 1;
         vault.save().unwrap();
 
-        let dv = VaultUnlocked::unlock(&path, b"duress").unwrap();
+        let dv = unlock_test_vault(&path, b"duress").unwrap();
         assert!(dv.is_duress);
         assert_eq!(dv.payload.nym_address, "[duress]");
     }
 
     #[test]
-    #[ignore = "slow: Argon2id at 64 MiB x 3 iters per call"]
     fn vault_file_starts_with_magic_and_version() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("vault.op4");
-        VaultUnlocked::create(&path, b"pass", b"duress").unwrap();
+        create_test_vault(&path, b"pass", b"duress");
         let raw = fs::read(&path).unwrap();
         assert_eq!(&raw[..4], b"OP4V");
         assert_eq!(raw[4], 2, "VAULT_VERSION must be 2");
