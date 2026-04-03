@@ -34,4 +34,8 @@ pub trait Transport: Send {
 
     /// Request a new Tor circuit (SIGNAL NEWNYM or equivalent).
     fn signal_newnym(&self);
+
+    /// Update the list of contact addresses used for cover traffic distribution.
+    /// Default no-op for transports that don't support cover traffic.
+    fn set_contact_addrs(&self, _addrs: Vec<String>) {}
 }

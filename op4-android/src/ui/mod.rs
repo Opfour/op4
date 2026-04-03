@@ -377,11 +377,12 @@ fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
     } else {
         kem.x25519_public.to_bytes()
     };
-    Some(PublicKeyBundle::from_keypairs(
+    Some(PublicKeyBundle::from_keypairs_with_opks(
         &kem,
         &signing,
         ratchet_pub,
         vault.payload.nym_address.clone(),
+        vault.payload.opk_public_keys(),
     ))
 }
 
@@ -596,28 +597,38 @@ fn handle_inbound_handshake(app: &mut Op4App, hs_bytes: &[u8]) {
     if app.pending_handshakes.len() >= MAX_PENDING_HANDSHAKES {
         return;
     }
-    let vault = match app.vault.as_ref() {
-        Some(v) => v,
-        None => return,
-    };
-    let bob_kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
-        Ok(k) => k,
-        Err(_) => return,
-    };
-    let bob_ratchet_secret = match load_ratchet_secret(vault) {
-        Some(s) => s,
-        None => return,
+    let (bob_kem, bob_ratchet_secret, opk_secrets) = {
+        let vault = match app.vault.as_ref() {
+            Some(v) => v,
+            None => return,
+        };
+        let kem = match HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret) {
+            Ok(k) => k,
+            Err(_) => return,
+        };
+        let ratchet = match load_ratchet_secret(vault) {
+            Some(s) => s,
+            None => return,
+        };
+        let opks = vault.payload.opk_secrets.clone();
+        (kem, ratchet, opks)
     };
     let hs_msg: op4_core::crypto::handshake::HandshakeInitMessage =
         match postcard::from_bytes(hs_bytes) {
             Ok(m) => m,
             Err(_) => return,
         };
-    let (plaintext, session_key) =
-        match perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &hs_msg) {
+    let (plaintext, session_key, consumed_opk) =
+        match perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &opk_secrets, &hs_msg) {
             Ok(r) => r,
             Err(_) => return,
         };
+
+    if let Some(idx) = consumed_opk {
+        if let Some(vault) = app.vault.as_mut() {
+            vault.payload.consume_opk(idx);
+        }
+    }
 
     app.pending_handshakes.push(PendingHandshake {
         bundle: hs_msg.alice_identity,

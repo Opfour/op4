@@ -29,7 +29,7 @@
 //! `"<56-char-v3-onion>.onion:LISTEN_PORT"` — stored in
 //! `PublicKeyBundle::nym_address` and shared with contacts.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use hkdf::Hkdf;
@@ -79,6 +79,8 @@ pub struct NymClient {
     /// Sender side of the NEWNYM channel. The background `control_loop` task
     /// owns the Tor control socket and processes signals from this channel.
     newnym_tx: mpsc::Sender<()>,
+    /// Contact addresses shared with the cover traffic loop.
+    contact_addrs: Arc<Mutex<Vec<String>>>,
 }
 
 impl NymClient {
@@ -165,7 +167,12 @@ impl NymClient {
         // ── 6. Spawn background tasks ─────────────────────────────────────────
         tokio::spawn(inbound_loop(listener, recv_tx));
         tokio::spawn(outbound_loop(send_rx, tor_socks_addr.to_owned()));
-        tokio::spawn(cover_traffic_loop(onion_address.clone(), send_tx.clone()));
+        let contact_addrs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn(cover_traffic_loop(
+            onion_address.clone(),
+            send_tx.clone(),
+            Arc::clone(&contact_addrs),
+        ));
         // The control socket is moved into control_loop, which keeps it alive
         // (Tor removes the hidden service when the control connection closes).
         tokio::spawn(control_loop(control, newnym_rx));
@@ -175,7 +182,15 @@ impl NymClient {
             send_tx,
             recv_rx,
             newnym_tx,
+            contact_addrs,
         })
+    }
+
+    /// Update the list of contact addresses used for cover traffic distribution.
+    pub fn set_contact_addrs(&self, addrs: Vec<String>) {
+        if let Ok(mut guard) = self.contact_addrs.lock() {
+            *guard = addrs;
+        }
     }
 
     /// Enqueue an encrypted wire message for delivery to `recipient_addr`.
@@ -239,6 +254,10 @@ impl Transport for NymClient {
 
     fn signal_newnym(&self) {
         NymClient::signal_newnym(self);
+    }
+
+    fn set_contact_addrs(&self, addrs: Vec<String>) {
+        NymClient::set_contact_addrs(self, addrs);
     }
 }
 
@@ -620,16 +639,36 @@ async fn control_loop(mut control: TcpStream, mut newnym_rx: mpsc::Receiver<()>)
     // which causes Tor to remove the hidden-service descriptor.
 }
 
-/// Send Poisson-distributed dummy messages to self for cover traffic.
+/// Send Poisson-distributed dummy messages for cover traffic.
 ///
-/// This ensures that an external observer always sees traffic flowing,
-/// making it harder to determine whether real messages are being exchanged.
-async fn cover_traffic_loop(own_address: String, send_tx: mpsc::Sender<OutboundItem>) {
+/// Randomly targets self or a known contact address so that an external
+/// observer cannot distinguish real messages from cover by destination alone.
+async fn cover_traffic_loop(
+    own_address: String,
+    send_tx: mpsc::Sender<OutboundItem>,
+    contact_addrs: Arc<Mutex<Vec<String>>>,
+) {
+    use rand::SeedableRng;
+    let mut rng = rand::rngs::StdRng::from_entropy();
     loop {
         let interval_secs = sample_exponential(COVER_MEAN_SECS);
         tokio::time::sleep(Duration::from_secs_f64(interval_secs)).await;
-        // try_send: drop silently if queue is full (cover traffic is best-effort)
-        let _ = send_tx.try_send((own_address.clone(), make_dummy_message(), None));
+
+        // Pick a target: 50% self, 50% random contact (if any).
+        let target = {
+            let contacts = contact_addrs.lock().ok();
+            let has_contacts = contacts
+                .as_ref()
+                .map_or(false, |c| !c.is_empty());
+            if has_contacts && rng.gen_bool(0.5) {
+                let c = contacts.unwrap();
+                c[rng.gen_range(0..c.len())].clone()
+            } else {
+                own_address.clone()
+            }
+        };
+
+        let _ = send_tx.try_send((target, make_dummy_message(), None));
     }
 }
 
