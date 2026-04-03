@@ -4370,7 +4370,7 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "op4-android"
-version = "0.2.0-dev"
+version = "0.3.0-dev"
 dependencies = [
  "android-activity",
  "arti-client",
@@ -4399,7 +4399,7 @@ dependencies = [
 
 [[package]]
 name = "op4-core"
-version = "0.2.0-dev"
+version = "0.3.0-dev"
 dependencies = [
  "argon2",
  "bs58",
@@ -4417,6 +4417,7 @@ dependencies = [
  "serde",
  "sha2",
  "tempfile",
+ "tokio",
  "x25519-dalek",
  "zeroize",
  "zxcvbn",
@@ -4424,7 +4425,7 @@ dependencies = [
 
 [[package]]
 name = "op4-tui"
-version = "0.2.0-dev"
+version = "0.3.0-dev"
 dependencies = [
  "bs58",
  "crossterm",

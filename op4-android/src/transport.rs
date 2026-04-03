@@ -23,7 +23,7 @@ use arti_client::{TorClient, config::TorClientConfigBuilder};
 use futures::StreamExt;
 use safelog::DisplayRedacted;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tor_cell::relaycell::msg::Connected;
 use tor_hsservice::{OnionServiceConfig, handle_rend_requests};
 use tor_rtcompat::PreferredRuntime;
@@ -41,11 +41,14 @@ const COVER_MEAN_SECS: f64 = 30.0;
 /// Maximum inbound frame size in bytes (DoS guard).
 const MAX_FRAME_BYTES: usize = 65_536;
 
+/// Outbound channel item: (recipient_addr, payload, optional delivery confirmation).
+type OutboundItem = (String, Vec<u8>, Option<oneshot::Sender<bool>>);
+
 /// arti-based Tor transport for Android.
 pub struct ArtiTransport {
     /// Our `.onion:port` address.
     address: String,
-    send_tx: mpsc::Sender<(String, Vec<u8>)>,
+    send_tx: mpsc::Sender<OutboundItem>,
     recv_rx: mpsc::UnboundedReceiver<IncomingMessage>,
 }
 
@@ -109,7 +112,7 @@ impl ArtiTransport {
 
         // ── 4. Channels ──────────────────────────────────────────────────
         let (recv_tx, recv_rx) = mpsc::unbounded_channel::<IncomingMessage>();
-        let (send_tx, send_rx) = mpsc::channel::<(String, Vec<u8>)>(64);
+        let (send_tx, send_rx) = mpsc::channel::<OutboundItem>(64);
 
         // ── 5. Spawn background tasks ────────────────────────────────────
         tokio::spawn(inbound_loop(rend_stream, recv_tx));
@@ -137,8 +140,20 @@ impl Transport for ArtiTransport {
 
     fn send(&self, recipient_addr: &str, payload: Vec<u8>) -> Result<(), NetworkError> {
         self.send_tx
-            .try_send((recipient_addr.to_owned(), payload))
+            .try_send((recipient_addr.to_owned(), payload, None))
             .map_err(|e| NetworkError::NymSend(e.to_string()))
+    }
+
+    fn send_with_confirm(
+        &self,
+        recipient_addr: &str,
+        payload: Vec<u8>,
+    ) -> Result<oneshot::Receiver<bool>, NetworkError> {
+        let (tx, rx) = oneshot::channel();
+        self.send_tx
+            .try_send((recipient_addr.to_owned(), payload, Some(tx)))
+            .map_err(|e| NetworkError::NymSend(e.to_string()))?;
+        Ok(rx)
     }
 
     fn try_recv_msg(&mut self) -> Option<IncomingMessage> {
@@ -147,7 +162,7 @@ impl Transport for ArtiTransport {
 
     fn signal_newnym(&self) {
         // arti manages circuit rotation internally.
-        // No explicit SIGNAL NEWNYM needed — arti rotates circuits based on
+        // No explicit SIGNAL NEWNYM needed -- arti rotates circuits based on
         // its own isolation and lifetime policies. This is a no-op on Android.
         log::debug!("signal_newnym: arti manages circuit rotation internally");
     }
@@ -207,32 +222,39 @@ async fn inbound_loop(
 
 /// Drain the outbound send queue, opening a fresh Tor connection per message.
 async fn outbound_loop(
-    mut send_rx: mpsc::Receiver<(String, Vec<u8>)>,
+    mut send_rx: mpsc::Receiver<OutboundItem>,
     client: Arc<TorClient<PreferredRuntime>>,
 ) {
-    while let Some((addr, payload)) = send_rx.recv().await {
+    while let Some((addr, payload, confirm_tx)) = send_rx.recv().await {
         let c = Arc::clone(&client);
         tokio::spawn(async move {
-            match c.connect(addr.as_str()).await {
+            let ok = match c.connect(addr.as_str()).await {
                 Ok(mut stream) => {
                     if let Err(e) = write_frame(&mut stream, &payload).await {
                         log::warn!("outbound write failed: {e}");
+                        false
+                    } else {
+                        true
                     }
                 }
                 Err(e) => {
                     log::warn!("outbound connect failed: {e}");
+                    false
                 }
+            };
+            if let Some(tx) = confirm_tx {
+                let _ = tx.send(ok);
             }
         });
     }
 }
 
 /// Send Poisson-distributed dummy messages to self for cover traffic.
-async fn cover_traffic_loop(own_address: String, send_tx: mpsc::Sender<(String, Vec<u8>)>) {
+async fn cover_traffic_loop(own_address: String, send_tx: mpsc::Sender<OutboundItem>) {
     loop {
         let interval_secs = sample_exponential(COVER_MEAN_SECS);
         tokio::time::sleep(Duration::from_secs_f64(interval_secs)).await;
-        let _ = send_tx.try_send((own_address.clone(), make_dummy_message()));
+        let _ = send_tx.try_send((own_address.clone(), make_dummy_message(), None));
     }
 }
 

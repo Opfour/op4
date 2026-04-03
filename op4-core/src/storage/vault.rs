@@ -20,6 +20,20 @@ const VAULT_MAGIC: &[u8; 4] = b"OP4V";
 const VAULT_VERSION: u8 = 2;
 const SALT_LEN: usize = 32;
 
+/// A message queued for delivery when the recipient was unreachable.
+/// Stores the already-encrypted wire payload so the ratchet state does not
+/// need to be re-advanced on retry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingOutbound {
+    pub contact_id: [u8; 32],
+    pub recipient_addr: String,
+    /// Serialised `WireMessage` bytes (encrypted + padded).
+    pub wire_payload: Vec<u8>,
+    pub retry_count: u32,
+    /// Vault sequence counter at the time this entry was created.
+    pub created_seq: u64,
+}
+
 /// Stored conversation metadata in the vault.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationMeta {
@@ -84,6 +98,10 @@ pub struct VaultPayload {
     pub settings: AppSettings,
     /// Monotonic sequence counter (incremented each time vault is saved)
     pub sequence: u64,
+    /// Messages awaiting delivery (encrypted wire payloads).
+    /// Backward-compatible: absent in older vault files, defaults to empty.
+    #[serde(default)]
+    pub outbox: Vec<PendingOutbound>,
 }
 
 /// An unlocked vault with its decrypted payload.
