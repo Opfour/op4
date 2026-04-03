@@ -1,6 +1,5 @@
 // op4-core: shared library for crypto, identity, storage, and network types.
-// Platform-independent — no TUI, no OS-specific hardening, no Tor control port.
-#![allow(dead_code)]
+// Platform-independent -- no TUI, no OS-specific hardening, no Tor control port.
 
 pub mod crypto;
 pub mod error;
