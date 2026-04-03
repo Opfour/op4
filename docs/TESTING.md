@@ -122,6 +122,7 @@ Navigate to Settings with `[3]` or `Tab`.
 | Item | Key | Expected Behaviour |
 |---|---|---|
 | Tor SOCKS5 address | Enter | Opens text edit popup; save changes to vault |
+| Nym gateway | Enter | Opens text edit popup; blank = auto-selection; saves to vault |
 | Auto-delete threshold | Enter | Opens number edit; blank = disabled |
 | Rotate identity keys | Enter | Confirmation popup; `y` generates new keys and broadcasts revocation |
 | Revoke & announce | Enter | Confirmation popup; `y` sends retirement revocation to all contacts |
@@ -130,6 +131,7 @@ Navigate to Settings with `[3]` or `Tab`.
 **What to verify:**
 
 - [ ] Tor address edit saves correctly and is shown updated in the list
+- [ ] Nym gateway edit saves correctly (blank = auto, address = custom)
 - [ ] Auto-delete edit saves (0 or blank = disabled, number = threshold)
 - [ ] Key rotation generates a new contact code (visible via `[e]`)
 - [ ] Revocation confirmation can be cancelled with Esc or `n`
@@ -176,14 +178,13 @@ These are automatic — just verify no unexpected crashes or warnings.
 
 These are **not bugs** for this testing round — they are known limitations:
 
-- The Nym gateway field in Settings has no edit popup yet (label only).
-- Inbound revocation certificates are received but not yet acted upon
-  in the TUI (contacts are not auto-updated on rotation).
-- There is no QR code display for contact codes; you must copy the
-  Base58 text manually.
+- Full contact codes (~4400 chars Base58) are too large for QR display.
+  Bootstrap codes do have a scannable QR code in the export popup.
 - Cover traffic (Poisson dummy messages) is active; you may see Tor
   traffic even when idle — this is intentional.
 - The app does not compile on macOS or Windows (Linux-only seccomp/prctl).
+- The **Android port is experimental / pre-release** — it compiles but is
+  not ready for testing. Do not file Android-related issues at this time.
 
 ---
 

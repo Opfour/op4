@@ -1,5 +1,10 @@
 # op4 Android Port — Roadmap
 
+> **Status: EXPERIMENTAL / PRE-RELEASE**
+> The Android port compiles and has basic identity key generation and transport
+> wired, but it is not ready for testing or daily use. Do not distribute the
+> APK to testers until this notice is removed.
+
 Roadmap for porting op4 to Android as a sideloaded APK (F-Droid / direct install).
 This is an exploratory document covering what works, what doesn't, and what
 needs to be built.
