@@ -153,6 +153,7 @@ fn show_create(app: &mut Op4App, ui: &mut egui::Ui) {
                         Zeroizing::new(signing_keypair.to_bytes());
                     vault.payload.identity_ratchet_secret =
                         Zeroizing::new(ratchet_secret.to_bytes().to_vec());
+                    vault.payload.generate_opks();
                     vault.save().ok();
 
                     app.vault = Some(vault);

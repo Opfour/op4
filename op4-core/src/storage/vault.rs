@@ -12,7 +12,11 @@ use crate::crypto::primitives::{
 use crate::error::VaultError;
 use crate::identity::profile::StoredContact;
 
+use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
+
 const VAULT_MAGIC: &[u8; 4] = b"OP4V";
+/// Number of one-time prekeys to generate per batch.
+pub const OPK_BATCH_SIZE: usize = 10;
 /// Version 2 adds 8-byte section-length prefix fields to the header so that
 /// AEAD decryption operates on the exact ciphertext bytes rather than the
 /// padded section.  This fixes duress-passphrase decryption after the first
@@ -102,6 +106,44 @@ pub struct VaultPayload {
     /// Backward-compatible: absent in older vault files, defaults to empty.
     #[serde(default)]
     pub outbox: Vec<PendingOutbound>,
+    /// One-time prekey X25519 secrets (32 bytes each). The corresponding public
+    /// keys are derived and included in our PublicKeyBundle. Each secret is
+    /// deleted after being consumed in a handshake.
+    #[serde(default)]
+    pub opk_secrets: Vec<[u8; 32]>,
+}
+
+impl VaultPayload {
+    /// Generate a fresh batch of OPK secrets. Call this during identity
+    /// creation and whenever the OPK pool is depleted.
+    pub fn generate_opks(&mut self) {
+        for _ in 0..OPK_BATCH_SIZE {
+            let secret = StaticSecret::random_from_rng(OsRng);
+            self.opk_secrets.push(secret.to_bytes());
+        }
+    }
+
+    /// Derive OPK public keys from the current secrets.
+    pub fn opk_public_keys(&self) -> Vec<[u8; 32]> {
+        self.opk_secrets
+            .iter()
+            .map(|s| {
+                let secret = StaticSecret::from(*s);
+                X25519PublicKey::from(&secret).to_bytes()
+            })
+            .collect()
+    }
+
+    /// Remove a consumed OPK by index. Returns true if removed.
+    pub fn consume_opk(&mut self, index: u16) -> bool {
+        let idx = index as usize;
+        if idx < self.opk_secrets.len() {
+            self.opk_secrets.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// An unlocked vault with its decrypted payload.

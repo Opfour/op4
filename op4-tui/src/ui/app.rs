@@ -232,6 +232,9 @@ pub fn run<B: ratatui::backend::Backend>(
     let bootstrap_code = build_bootstrap_code(&vault);
     let mut app = AppState::new(export_code, bootstrap_code);
 
+    // Sync contact addresses to cover traffic loop.
+    sync_cover_addrs(&vault, nym);
+
     // Prune expired outbox entries and retry any queued from previous session.
     prune_outbox(&mut vault);
     flush_outbox(&mut app, &mut vault, nym);
@@ -295,6 +298,18 @@ pub fn run<B: ratatui::backend::Backend>(
     Ok(())
 }
 
+/// Push current contact onion addresses to the cover traffic loop.
+fn sync_cover_addrs(vault: &VaultUnlocked, nym: &NymClient) {
+    let addrs: Vec<String> = vault
+        .payload
+        .contacts
+        .iter()
+        .map(|c| c.bundle.nym_address.clone())
+        .filter(|a| !a.is_empty())
+        .collect();
+    nym.set_contact_addrs(addrs);
+}
+
 /// Reconstruct our full `PublicKeyBundle` from vault key material.
 /// Returns `None` when the vault lacks identity keys (first-run not complete).
 fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
@@ -313,11 +328,12 @@ fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
     } else {
         kem.x25519_public.to_bytes()
     };
-    Some(PublicKeyBundle::from_keypairs(
+    Some(PublicKeyBundle::from_keypairs_with_opks(
         &kem,
         &signing,
         ratchet_pub,
         vault.payload.nym_address.clone(),
+        vault.payload.opk_public_keys(),
     ))
 }
 
@@ -943,6 +959,7 @@ fn handle_contacts_key(
                             let new_idx = vault.payload.contacts.len() - 1;
                             app.contacts_list.select(Some(new_idx));
                             vault.save().ok();
+                            sync_cover_addrs(vault, nym);
                             app.contact_mode = ContactMode::List;
                             app.status =
                                 "Contact added. Press [v] to verify fingerprint out-of-band."
@@ -983,7 +1000,7 @@ fn handle_contacts_key(
                 app.status = contacts_help(app.pending_handshakes.len());
             }
             KeyCode::Enter => {
-                accept_pending_handshake(app, vault);
+                accept_pending_handshake(app, vault, nym);
             }
             KeyCode::Backspace => {
                 app.pending_name_buf.pop();
@@ -998,7 +1015,7 @@ fn handle_contacts_key(
 
 /// Accept the first pending handshake: add the contact, init the ratchet,
 /// persist the initial message, and dismiss the popup.
-fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked) {
+fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked, nym: &NymClient) {
     if app.pending_handshakes.is_empty() {
         app.contact_mode = ContactMode::List;
         return;
@@ -1046,6 +1063,7 @@ fn accept_pending_handshake(app: &mut AppState, vault: &mut VaultUnlocked) {
     vault.save_messages(&contact_id, &[initial_msg]).ok();
 
     vault.save().ok();
+    sync_cover_addrs(vault, nym);
     app.contact_mode = ContactMode::List;
     app.status = format!(
         "Contact '{}' added. Switch to Messages to reply.",
@@ -1745,7 +1763,7 @@ fn handle_incoming_message(
         }
 
         WireMessageType::BundleResponse => {
-            handle_inbound_bundle_response(app, vault, &wire.ciphertext);
+            handle_inbound_bundle_response(app, vault, nym, &wire.ciphertext);
         }
 
         WireMessageType::Revocation => {
@@ -1780,11 +1798,16 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
     };
 
     // Complete the handshake as the responder.
-    let (plaintext, session_key) =
-        match perform_handshake_bob(&our_kem, &bob_ratchet_secret, &hs_msg) {
+    let (plaintext, session_key, consumed_opk) =
+        match perform_handshake_bob(&our_kem, &bob_ratchet_secret, &vault.payload.opk_secrets, &hs_msg) {
             Ok(r) => r,
             Err(_) => return, // MAC or decryption failure
         };
+
+    // Delete consumed one-time prekey from the vault.
+    if let Some(idx) = consumed_opk {
+        vault.payload.consume_opk(idx);
+    }
 
     // Identify the sender by their Ed25519 verifying key.
     let alice_ed_vk = hs_msg.alice_identity.ed25519_vk;
@@ -2160,6 +2183,7 @@ fn handle_inbound_bundle_request(
 fn handle_inbound_bundle_response(
     app: &mut AppState,
     vault: &mut VaultUnlocked,
+    nym: &NymClient,
     ciphertext: &[u8],
 ) {
     // Decrypt the sealed response using our X25519 identity key.
@@ -2228,6 +2252,7 @@ fn handle_inbound_bundle_response(
     let new_idx = vault.payload.contacts.len() - 1;
     app.contacts_list.select(Some(new_idx));
     vault.save().ok();
+    sync_cover_addrs(vault, nym);
 
     app.status = format!(
         "Contact '{}' added via QR bootstrap. Press [v] to verify fingerprint.",
@@ -2316,6 +2341,8 @@ fn rotate_keys(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClien
     vault.payload.identity_kem_secret = Zeroizing::new(new_kem.to_bytes());
     vault.payload.identity_signing_secret = Zeroizing::new(new_signing.to_bytes());
     vault.payload.identity_ratchet_secret = Zeroizing::new(new_ratchet.to_bytes().to_vec());
+    vault.payload.opk_secrets.clear();
+    vault.payload.generate_opks();
     vault.save().ok();
     app.export_code = build_export_code(vault);
     app.bootstrap_code = build_bootstrap_code(vault);

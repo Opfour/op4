@@ -24,6 +24,9 @@ pub struct HandshakeInitMessage {
     pub initial_ct: Vec<u8>,
     /// HMAC over (alice_identity_bytes || alice_ek_x25519 || alice_mlkem_ct_bytes)
     pub mac: [u8; 32],
+    /// Index of the one-time prekey used from Bob's bundle (None = no OPK).
+    #[serde(default)]
+    pub opk_index: Option<u16>,
 }
 
 /// Session key output from a completed handshake.
@@ -44,7 +47,8 @@ pub struct HandshakeOutput {
 /// DH2 = X25519(Alice_EK,  Bob_IK)
 /// DH3 = X25519(Alice_EK,  Bob_SPK)  [Bob_SPK = Bob.ratchet_pub]
 /// DH4_ss = ML-KEM-Encap(Bob_MLKEM_EK) shared secret
-/// SK = HKDF(DH1 || DH2 || DH3 || DH4_ss, salt=0x00*32, info="op4-x3dh-v1")
+/// DH5 = X25519(Alice_EK,  Bob_OPK)  [optional, if Bob has OPKs]
+/// SK = HKDF(DH1 || DH2 || DH3 || DH4_ss [|| DH5], salt=0x00*32, info="op4-x3dh-v1")
 /// ```
 /// Returns (HandshakeInitMessage, session_key).
 pub fn perform_handshake_alice(
@@ -61,11 +65,11 @@ pub fn perform_handshake_alice(
 
     let bob_ik_pub = X25519PublicKey::from(bob_bundle.x25519_pub);
 
-    // DH1: Alice identity key × Bob identity key
+    // DH1: Alice identity key x Bob identity key
     let dh1 = alice_kem.x25519_secret.diffie_hellman(&bob_ik_pub);
-    // DH2: Alice ephemeral key × Bob identity key
+    // DH2: Alice ephemeral key x Bob identity key
     let dh2 = alice_ek_secret.diffie_hellman(&bob_ik_pub);
-    // DH3: Alice ephemeral key × Bob signed prekey (Bob's dedicated ratchet pub).
+    // DH3: Alice ephemeral key x Bob signed prekey (Bob's dedicated ratchet pub).
     // Falls back to Bob's IK for contacts with pre-ratchet_pub bundles.
     let bob_spk = if bob_bundle.ratchet_pub != [0u8; 32] {
         X25519PublicKey::from(bob_bundle.ratchet_pub)
@@ -77,12 +81,25 @@ pub fn perform_handshake_alice(
     // DH4: ML-KEM encapsulation to Bob's ML-KEM public key
     let (mlkem_ct, dh4_ss) = hybrid_kem_encapsulate(bob_bundle, &alice_ek_secret)?;
 
-    // Derive session key
-    let session_key = combine_dh_outputs(dh1.as_bytes(), dh2.as_bytes(), dh3.as_bytes(), &dh4_ss)?;
+    // DH5: one-time prekey (if Bob's bundle includes OPKs)
+    let (opk_index, dh5) = if let Some(opk_pub) = bob_bundle.opk_pubs.first() {
+        let opk = X25519PublicKey::from(*opk_pub);
+        (Some(0u16), Some(alice_ek_secret.diffie_hellman(&opk)))
+    } else {
+        (None, None)
+    };
 
-    // Build the identity bundle first — it is used as AAD and MAC input so that
-    // ALL identity fields (Ed25519, ML-DSA, ratchet pub, nym address) are
-    // cryptographically bound to the message, preventing field substitution attacks.
+    // Derive session key
+    let session_key = combine_dh_outputs(
+        dh1.as_bytes(),
+        dh2.as_bytes(),
+        dh3.as_bytes(),
+        &dh4_ss,
+        dh5.as_ref().map(|d| d.as_bytes()),
+    )?;
+
+    // Build the identity bundle -- used as AAD and MAC input so that
+    // ALL identity fields are cryptographically bound to the message.
     let alice_identity = PublicKeyBundle::from_keypairs(
         alice_kem,
         alice_signing,
@@ -90,8 +107,6 @@ pub fn perform_handshake_alice(
         alice_nym_address,
     );
 
-    // Serialize the FULL bundle (not just the X25519 key) as AEAD additional data.
-    // Bob will serialize the received bundle and must get the same bytes.
     let alice_id_bytes =
         postcard::to_allocvec(&alice_identity).map_err(|_| CryptoError::Serialize)?;
 
@@ -99,7 +114,6 @@ pub fn perform_handshake_alice(
     let initial_ct = aead_encrypt(&session_key, initial_plaintext, &alice_id_bytes)?;
 
     // HMAC over (full_identity_bundle || alice_ek_x25519 || mlkem_ct) using session key.
-    // Covers every field that could be swapped by a relay.
     let mlkem_ct_bytes = postcard::to_allocvec(&mlkem_ct).map_err(|_| CryptoError::Serialize)?;
     let mut mac_input = Vec::new();
     mac_input.extend_from_slice(&alice_id_bytes);
@@ -114,6 +128,7 @@ pub fn perform_handshake_alice(
             alice_mlkem_ct: mlkem_ct,
             initial_ct,
             mac,
+            opk_index,
         },
         session_key,
     ))
@@ -122,34 +137,56 @@ pub fn perform_handshake_alice(
 // ─── Responder (Bob) ──────────────────────────────────────────────────────────
 
 /// Respond to a handshake as Bob. Derives the same session key as Alice.
-/// Returns (decrypted_initial_payload, session_key).
+/// Returns (decrypted_initial_payload, session_key, optional OPK index that was consumed).
 ///
 /// `bob_ratchet_secret` must be the dedicated ratchet X25519 secret from the
 /// vault (`identity_ratchet_secret`). It is used for DH3 to match Alice's
 /// `DH3 = X25519(Alice_EK, Bob_SPK)` where Bob_SPK = Bob's ratchet public key.
+///
+/// `bob_opk_secrets` are the one-time prekey secrets corresponding to the
+/// public keys in Bob's bundle. If Alice used an OPK, Bob computes DH5 and
+/// the caller should delete the consumed secret from the vault.
 pub fn perform_handshake_bob(
     bob_kem: &HybridKemKeypair,
     bob_ratchet_secret: &StaticSecret,
+    bob_opk_secrets: &[[u8; 32]],
     msg: &HandshakeInitMessage,
-) -> Result<(Vec<u8>, SymKey), CryptoError> {
-    // Verify Alice's identity bundle is well-formed (key parsing check)
+) -> Result<(Vec<u8>, SymKey, Option<u16>), CryptoError> {
     let alice_ik_pub = X25519PublicKey::from(msg.alice_identity.x25519_pub);
     let alice_ek_pub = X25519PublicKey::from(msg.alice_ek_x25519);
 
-    // DH1: Bob identity key × Alice identity key
+    // DH1: Bob identity key x Alice identity key
     let dh1 = bob_kem.x25519_secret.diffie_hellman(&alice_ik_pub);
-    // DH2: Bob identity key × Alice ephemeral key
+    // DH2: Bob identity key x Alice ephemeral key
     let dh2 = bob_kem.x25519_secret.diffie_hellman(&alice_ek_pub);
-    // DH3: Bob ratchet key × Alice ephemeral key (reciprocal of Alice's DH3).
-    // Alice computed DH3 = X25519(Alice_EK, Bob_SPK); we compute the same
-    // shared secret from the other side using our ratchet secret.
+    // DH3: Bob ratchet key x Alice ephemeral key
     let dh3 = bob_ratchet_secret.diffie_hellman(&alice_ek_pub);
 
     // DH4: ML-KEM decapsulation
     let dh4_ss = hybrid_kem_decapsulate(bob_kem, &alice_ek_pub, &msg.alice_mlkem_ct)?;
 
+    // DH5: one-time prekey (if Alice specified an OPK index)
+    let dh5 = if let Some(idx) = msg.opk_index {
+        let idx = idx as usize;
+        if idx < bob_opk_secrets.len() {
+            let opk_secret = StaticSecret::from(bob_opk_secrets[idx]);
+            Some(opk_secret.diffie_hellman(&alice_ek_pub))
+        } else {
+            // Alice referenced an OPK we don't have -- reject
+            return Err(CryptoError::KeyParse);
+        }
+    } else {
+        None
+    };
+
     // Derive session key (must match Alice's derivation)
-    let session_key = combine_dh_outputs(dh1.as_bytes(), dh2.as_bytes(), dh3.as_bytes(), &dh4_ss)?;
+    let session_key = combine_dh_outputs(
+        dh1.as_bytes(),
+        dh2.as_bytes(),
+        dh3.as_bytes(),
+        &dh4_ss,
+        dh5.as_ref().map(|d| d.as_bytes()),
+    )?;
 
     // Serialize Alice's FULL received identity bundle — this must match Alice's
     // serialization exactly. Any field substituted in transit will produce
@@ -172,7 +209,7 @@ pub fn perform_handshake_bob(
     // Decrypt initial payload using the same full-bundle AAD that Alice used.
     let plaintext = aead_decrypt(&session_key, &msg.initial_ct, &alice_id_bytes)?;
 
-    Ok((plaintext, session_key))
+    Ok((plaintext, session_key, msg.opk_index))
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -182,12 +219,16 @@ fn combine_dh_outputs(
     dh2: &[u8; 32],
     dh3: &[u8; 32],
     dh4_ss: &SymKey,
+    dh5: Option<&[u8; 32]>,
 ) -> Result<SymKey, CryptoError> {
-    let mut ikm = Vec::with_capacity(32 * 4);
+    let mut ikm = Vec::with_capacity(32 * 5);
     ikm.extend_from_slice(dh1);
     ikm.extend_from_slice(dh2);
     ikm.extend_from_slice(dh3);
     ikm.extend_from_slice(&dh4_ss.0);
+    if let Some(dh5_bytes) = dh5 {
+        ikm.extend_from_slice(dh5_bytes);
+    }
 
     let mut sk = [0u8; AEAD_KEY_LEN];
     hkdf_expand(&ikm, Some(&[0u8; 32]), b"op4-x3dh-v1", &mut sk)?;
@@ -232,8 +273,8 @@ mod tests {
         )
         .unwrap();
 
-        let (plaintext, bob_sk) =
-            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).unwrap();
+        let (plaintext, bob_sk, _) =
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &[], &msg).unwrap();
 
         assert_eq!(alice_sk.0, bob_sk.0, "session keys must match");
         assert_eq!(
@@ -284,7 +325,7 @@ mod tests {
 
         msg.mac[0] ^= 0xff; // flip a bit in the HMAC tag
         assert!(
-            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).is_err(),
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &[], &msg).is_err(),
             "tampered MAC must be rejected"
         );
     }
@@ -310,7 +351,104 @@ mod tests {
             *b ^= 0xff;
         }
         // Either the MAC check or AEAD decryption must reject this
-        assert!(perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &msg).is_err());
+        assert!(perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &[], &msg).is_err());
+    }
+
+    #[test]
+    fn handshake_with_opk_produces_different_session_key() {
+        // Same identities, but Bob has OPKs in one case and not the other.
+        let (bob_kem, _bob_signing, bob_ratchet_secret, bob_bundle_no_opk) = make_bob();
+
+        // Generate OPK secrets and build a bundle that includes them.
+        let opk_secret = StaticSecret::random_from_rng(OsRng);
+        let opk_pub = X25519PublicKey::from(&opk_secret).to_bytes();
+        let opk_secrets = vec![opk_secret.to_bytes()];
+
+        let bob_signing = HybridSigningKeypair::generate();
+        let bob_bundle_with_opk = PublicKeyBundle::from_keypairs_with_opks(
+            &bob_kem,
+            &bob_signing,
+            X25519PublicKey::from(&bob_ratchet_secret).to_bytes(),
+            "bob_addr".into(),
+            vec![opk_pub],
+        );
+
+        let alice_kem = HybridKemKeypair::generate();
+        let alice_signing = HybridSigningKeypair::generate();
+
+        // Handshake WITHOUT OPK
+        let (msg_no_opk, sk_no_opk) = perform_handshake_alice(
+            &alice_kem,
+            &alice_signing,
+            [0u8; 32],
+            "alice_addr".into(),
+            &bob_bundle_no_opk,
+            b"hi",
+        )
+        .unwrap();
+        assert!(msg_no_opk.opk_index.is_none());
+
+        // Handshake WITH OPK (different Alice ephemeral, so keys differ anyway,
+        // but we verify OPK index is set and Bob can complete it)
+        let alice_kem2 = HybridKemKeypair::generate();
+        let alice_signing2 = HybridSigningKeypair::generate();
+        let (msg_with_opk, sk_with_opk) = perform_handshake_alice(
+            &alice_kem2,
+            &alice_signing2,
+            [0u8; 32],
+            "alice_addr".into(),
+            &bob_bundle_with_opk,
+            b"hi",
+        )
+        .unwrap();
+        assert_eq!(msg_with_opk.opk_index, Some(0));
+
+        // Bob completes the OPK handshake
+        let (pt, bob_sk, consumed) =
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &opk_secrets, &msg_with_opk)
+                .unwrap();
+        assert_eq!(pt, b"hi");
+        assert_eq!(bob_sk.0, sk_with_opk.0);
+        assert_eq!(consumed, Some(0));
+
+        // Keys must differ from the no-OPK handshake (different ephemerals + OPK)
+        assert_ne!(sk_no_opk.0, sk_with_opk.0);
+    }
+
+    #[test]
+    fn handshake_bob_rejects_invalid_opk_index() {
+        let (bob_kem, _bob_signing, bob_ratchet_secret, _bob_bundle) = make_bob();
+        let alice_kem = HybridKemKeypair::generate();
+        let alice_signing = HybridSigningKeypair::generate();
+
+        let opk_secret = StaticSecret::random_from_rng(OsRng);
+        let opk_pub = X25519PublicKey::from(&opk_secret).to_bytes();
+
+        let bob_signing2 = HybridSigningKeypair::generate();
+        let bob_bundle = PublicKeyBundle::from_keypairs_with_opks(
+            &bob_kem,
+            &bob_signing2,
+            X25519PublicKey::from(&bob_ratchet_secret).to_bytes(),
+            "bob_addr".into(),
+            vec![opk_pub],
+        );
+
+        let (mut msg, _) = perform_handshake_alice(
+            &alice_kem,
+            &alice_signing,
+            [0u8; 32],
+            "alice_addr".into(),
+            &bob_bundle,
+            b"hi",
+        )
+        .unwrap();
+
+        // Tamper: set OPK index beyond available secrets
+        msg.opk_index = Some(99);
+        assert!(
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &[opk_secret.to_bytes()], &msg)
+                .is_err()
+        );
     }
 
     /// Full integration: handshake -> ratchet init -> multi-message bidirectional
@@ -338,8 +476,8 @@ mod tests {
         .unwrap();
 
         // ── 3. Bob completes handshake ──────────────────────────────────
-        let (initial_plaintext, bob_sk) =
-            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &hs_msg).unwrap();
+        let (initial_plaintext, bob_sk, _) =
+            perform_handshake_bob(&bob_kem, &bob_ratchet_secret, &[], &hs_msg).unwrap();
         assert_eq!(initial_plaintext, b"hello from alice");
         assert_eq!(alice_sk.0, bob_sk.0);
 

@@ -26,7 +26,7 @@ fn main() {
     // (substituted crate versions in Cargo.lock, altered [dependencies] in
     // Cargo.toml) are reflected in the embedded source hash.  build.rs itself
     // is included so a tampered build script changes the hash too.
-    for extra in &["Cargo.toml", "Cargo.lock", "build.rs"] {
+    for extra in &["Cargo.toml", "Cargo.lock", "build.rs", "../deny.toml"] {
         if let Ok(mut f) = fs::File::open(Path::new(extra)) {
             let mut buf = Vec::new();
             f.read_to_end(&mut buf).unwrap_or(0);
@@ -42,4 +42,5 @@ fn main() {
     println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=Cargo.lock");
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../deny.toml");
 }

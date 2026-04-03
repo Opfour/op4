@@ -16,7 +16,7 @@
 //! same onion address (after first bootstrap).
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arti_client::{TorClient, config::TorClientConfigBuilder};
@@ -50,6 +50,8 @@ pub struct ArtiTransport {
     address: String,
     send_tx: mpsc::Sender<OutboundItem>,
     recv_rx: mpsc::UnboundedReceiver<IncomingMessage>,
+    /// Contact addresses shared with the cover traffic loop.
+    contact_addrs: Arc<Mutex<Vec<String>>>,
 }
 
 impl ArtiTransport {
@@ -117,7 +119,12 @@ impl ArtiTransport {
         // ── 5. Spawn background tasks ────────────────────────────────────
         tokio::spawn(inbound_loop(rend_stream, recv_tx));
         tokio::spawn(outbound_loop(send_rx, Arc::clone(&client)));
-        tokio::spawn(cover_traffic_loop(onion_addr.clone(), send_tx.clone()));
+        let contact_addrs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        tokio::spawn(cover_traffic_loop(
+            onion_addr.clone(),
+            send_tx.clone(),
+            Arc::clone(&contact_addrs),
+        ));
 
         // Keep the service Arc alive — dropping it removes the onion service.
         tokio::spawn(async move {
@@ -129,6 +136,7 @@ impl ArtiTransport {
             address: onion_addr,
             send_tx,
             recv_rx,
+            contact_addrs,
         })
     }
 }
@@ -165,6 +173,12 @@ impl Transport for ArtiTransport {
         // No explicit SIGNAL NEWNYM needed -- arti rotates circuits based on
         // its own isolation and lifetime policies. This is a no-op on Android.
         log::debug!("signal_newnym: arti manages circuit rotation internally");
+    }
+
+    fn set_contact_addrs(&self, addrs: Vec<String>) {
+        if let Ok(mut guard) = self.contact_addrs.lock() {
+            *guard = addrs;
+        }
     }
 }
 
@@ -249,12 +263,31 @@ async fn outbound_loop(
     }
 }
 
-/// Send Poisson-distributed dummy messages to self for cover traffic.
-async fn cover_traffic_loop(own_address: String, send_tx: mpsc::Sender<OutboundItem>) {
+/// Send Poisson-distributed dummy messages for cover traffic.
+/// Randomly targets self or a known contact address.
+async fn cover_traffic_loop(
+    own_address: String,
+    send_tx: mpsc::Sender<OutboundItem>,
+    contact_addrs: Arc<Mutex<Vec<String>>>,
+) {
+    use rand::{Rng, SeedableRng};
+    let mut rng = rand::rngs::StdRng::from_entropy();
     loop {
         let interval_secs = sample_exponential(COVER_MEAN_SECS);
         tokio::time::sleep(Duration::from_secs_f64(interval_secs)).await;
-        let _ = send_tx.try_send((own_address.clone(), make_dummy_message(), None));
+
+        let target = {
+            let contacts = contact_addrs.lock().ok();
+            let has_contacts = contacts.as_ref().map_or(false, |c| !c.is_empty());
+            if has_contacts && rng.gen_bool(0.5) {
+                let c = contacts.unwrap();
+                c[rng.gen_range(0..c.len())].clone()
+            } else {
+                own_address.clone()
+            }
+        };
+
+        let _ = send_tx.try_send((target, make_dummy_message(), None));
     }
 }
 
