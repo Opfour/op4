@@ -10,7 +10,7 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-op4-core = { path = "../op4-core" }
+op4-core = { version = "0.3.0", path = "../op4-core" }
 libc = "0.2"
 getrandom = "0.2"
 log = "0.4"
