@@ -147,8 +147,7 @@ fn show_create(app: &mut Op4App, ui: &mut egui::Ui) {
                     let kem_keypair = HybridKemKeypair::generate();
                     let signing_keypair = HybridSigningKeypair::generate();
                     let ratchet_secret = StaticSecret::random_from_rng(rand::rngs::OsRng);
-                    vault.payload.identity_kem_secret =
-                        Zeroizing::new(kem_keypair.to_bytes());
+                    vault.payload.identity_kem_secret = Zeroizing::new(kem_keypair.to_bytes());
                     vault.payload.identity_signing_secret =
                         Zeroizing::new(signing_keypair.to_bytes());
                     vault.payload.identity_ratchet_secret =

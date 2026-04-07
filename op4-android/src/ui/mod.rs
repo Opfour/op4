@@ -267,7 +267,8 @@ impl eframe::App for Op4App {
         }
 
         // Reload messages if selected contact changed
-        if self.screen == Screen::Main && self.tab == Tab::Conversation
+        if self.screen == Screen::Main
+            && self.tab == Tab::Conversation
             && Some(self.selected_contact) != self.loaded_contact_idx
         {
             self.reload_messages();
@@ -367,8 +368,7 @@ fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
         return None;
     }
     let kem = HybridKemKeypair::from_bytes(&vault.payload.identity_kem_secret).ok()?;
-    let signing =
-        HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret).ok()?;
+    let signing = HybridSigningKeypair::from_bytes(&vault.payload.identity_signing_secret).ok()?;
     let ratchet_pub = if vault.payload.identity_ratchet_secret.len() == 32 {
         let bytes: [u8; 32] = vault.payload.identity_ratchet_secret[..32]
             .try_into()

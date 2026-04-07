@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use op4_core::identity::profile::StoredContact;
 use crate::ui::input::sanitize_for_display;
+use op4_core::identity::profile::StoredContact;
 
 /// Render the contacts list panel.
 ///

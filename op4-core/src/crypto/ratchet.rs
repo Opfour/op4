@@ -558,7 +558,11 @@ mod tests {
         // We do this by artificially advancing total_recv and purging.
         bob.total_recv += SKIPPED_KEY_MAX_AGE + 1;
         bob.purge_expired_skipped_keys();
-        assert_eq!(bob.mkskipped.len(), 0, "skipped keys should be purged after TTL");
+        assert_eq!(
+            bob.mkskipped.len(),
+            0,
+            "skipped keys should be purged after TTL"
+        );
 
         // The expired skipped key should no longer decrypt
         assert!(bob.ratchet_decrypt(&hdr0, &ct0).is_err());

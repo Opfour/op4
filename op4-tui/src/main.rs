@@ -123,7 +123,8 @@ async fn main() {
     // ── 8. TUI event loop ─────────────────────────────────────────────────
     // block_in_place: signals tokio to reschedule other async tasks to worker
     // threads while this thread runs the synchronous TUI loop.
-    let result = tokio::task::block_in_place(|| op4_tui::ui::app::run(&mut terminal, vault, &mut nym));
+    let result =
+        tokio::task::block_in_place(|| op4_tui::ui::app::run(&mut terminal, vault, &mut nym));
 
     // ── 9. Restore terminal unconditionally ───────────────────────────────
     restore_terminal(&mut terminal);

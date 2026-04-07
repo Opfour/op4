@@ -63,19 +63,17 @@ mod tests {
     /// Returns true when running under tarpaulin (ptrace-based coverage),
     /// which causes check_no_debugger to detect the tracer.
     fn under_tarpaulin() -> bool {
-        std::env::var("TARPAULIN").is_ok()
-            || std::env::var("CARGO_TARPAULIN").is_ok()
-            || {
-                // Fallback: check if TracerPid != 0 right now
-                std::fs::read_to_string("/proc/self/status")
-                    .ok()
-                    .and_then(|s| {
-                        s.lines()
-                            .find(|l| l.starts_with("TracerPid:\t"))
-                            .map(|l| l.trim_start_matches("TracerPid:\t").trim() != "0")
-                    })
-                    .unwrap_or(false)
-            }
+        std::env::var("TARPAULIN").is_ok() || std::env::var("CARGO_TARPAULIN").is_ok() || {
+            // Fallback: check if TracerPid != 0 right now
+            std::fs::read_to_string("/proc/self/status")
+                .ok()
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.starts_with("TracerPid:\t"))
+                        .map(|l| l.trim_start_matches("TracerPid:\t").trim() != "0")
+                })
+                .unwrap_or(false)
+        }
     }
 
     #[test]

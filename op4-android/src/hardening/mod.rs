@@ -1,6 +1,6 @@
-pub mod memory;
-pub mod integrity;
 pub mod entropy;
+pub mod integrity;
+pub mod memory;
 pub mod root;
 pub mod storage;
 
