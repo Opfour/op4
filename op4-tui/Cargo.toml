@@ -27,7 +27,7 @@ ratatui          = "0.30.0"
 crossterm        = "0.29.0"
 
 # Randomness (cover traffic)
-rand             = "0.8.5"
+rand             = "0.9.2"
 
 # Serialization (NymClient uses postcard for wire messages)
 serde            = { version = "1.0.197", features = ["derive"] }
