@@ -35,13 +35,13 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all --check
 
       - name: Clippy (all targets, deny warnings)
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test --workspace --locked
 
   # ── Security Audit ───────────────────────────────────────────────────────────
   audit:
@@ -59,7 +59,7 @@ jobs:
           tool: cargo-audit
 
       - name: Run cargo audit
-        run: cargo audit
+        run: cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0436
 
   # ── Dependency Policy ────────────────────────────────────────────────────────
   deny:

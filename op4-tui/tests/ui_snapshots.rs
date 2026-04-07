@@ -214,9 +214,18 @@ fn fingerprint_unverified_shows_warning() {
     let output = render_to_string(70, 12, |f| {
         op4_tui::ui::contacts::render_fingerprint_panel(f, &contact, f.area());
     });
-    assert!(output.contains("FINGERPRINT NOT VERIFIED"), "unverified must show warning");
-    assert!(output.contains("Key Fingerprint"), "must show fingerprint panel");
-    assert!(output.contains("Fingerprint:"), "must display fingerprint label");
+    assert!(
+        output.contains("FINGERPRINT NOT VERIFIED"),
+        "unverified must show warning"
+    );
+    assert!(
+        output.contains("Key Fingerprint"),
+        "must show fingerprint panel"
+    );
+    assert!(
+        output.contains("Fingerprint:"),
+        "must display fingerprint label"
+    );
 }
 
 #[test]
@@ -233,7 +242,16 @@ fn fingerprint_verified_shows_checkmark() {
     let output = render_to_string(70, 12, |f| {
         op4_tui::ui::contacts::render_fingerprint_panel(f, &contact, f.area());
     });
-    assert!(output.contains("Fingerprint verified"), "verified must show confirmation");
-    assert!(!output.contains("FINGERPRINT NOT VERIFIED"), "must not show warning");
-    assert!(output.contains("Key Fingerprint"), "must show fingerprint panel");
+    assert!(
+        output.contains("Fingerprint verified"),
+        "verified must show confirmation"
+    );
+    assert!(
+        !output.contains("FINGERPRINT NOT VERIFIED"),
+        "must not show warning"
+    );
+    assert!(
+        output.contains("Key Fingerprint"),
+        "must show fingerprint panel"
+    );
 }

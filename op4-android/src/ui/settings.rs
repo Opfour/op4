@@ -69,18 +69,16 @@ pub fn show(app: &mut Op4App, ui: &mut egui::Ui) {
                 .collapsible(false)
                 .show(ui.ctx(), |ui| {
                     ui.label("Enter message count (blank = disable):");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut app.edit_buf)
-                            .desired_width(100.0),
-                    );
+                    ui.add(egui::TextEdit::singleline(&mut app.edit_buf).desired_width(100.0));
                     ui.horizontal(|ui| {
                         if ui.button("Save").clicked() {
                             let vault = app.vault.as_mut().unwrap();
-                            vault.payload.settings.default_auto_delete = if app.edit_buf.trim().is_empty() {
-                                None
-                            } else {
-                                app.edit_buf.trim().parse::<u32>().ok()
-                            };
+                            vault.payload.settings.default_auto_delete =
+                                if app.edit_buf.trim().is_empty() {
+                                    None
+                                } else {
+                                    app.edit_buf.trim().parse::<u32>().ok()
+                                };
                             vault.save().ok();
                             app.settings_edit = SettingsEditMode::None;
                             app.status = "Auto-delete updated.".into();

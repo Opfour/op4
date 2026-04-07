@@ -230,6 +230,10 @@ mod tests {
         // Verify the seccomp BPF filter compiles without error.
         // Does NOT install the filter -- that would break the test runner.
         let result = build_filter();
-        assert!(result.is_ok(), "seccomp filter must compile: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "seccomp filter must compile: {:?}",
+            result.err()
+        );
     }
 }

@@ -1,12 +1,9 @@
 use eframe::egui;
 
-use op4_core::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use op4_core::crypto::ratchet::RatchetState;
+use op4_core::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 
-use super::{
-    sanitize, load_ratchet_secret,
-    ContactMode, Op4App, Screen,
-};
+use super::{load_ratchet_secret, sanitize, ContactMode, Op4App, Screen};
 use op4_core::storage::vault::StoredMessage;
 
 pub fn show(app: &mut Op4App, ui: &mut egui::Ui) {
@@ -39,11 +36,7 @@ fn show_contact_list(app: &mut Op4App, ui: &mut egui::Ui) {
             app.contact_mode = ContactMode::ExportCode;
         }
         let pending = app.pending_handshakes.len();
-        if pending > 0
-            && ui
-                .button(format!("Pending ({pending})"))
-                .clicked()
-        {
+        if pending > 0 && ui.button(format!("Pending ({pending})")).clicked() {
             app.contact_mode = ContactMode::PendingRequest;
             app.pending_name_buf.clear();
         }
@@ -188,8 +181,7 @@ fn show_add_contact(app: &mut Op4App, ui: &mut egui::Ui) {
                     Ok(code) => {
                         let vault = app.vault.as_mut().unwrap();
                         let seq = vault.payload.sequence;
-                        let label =
-                            format!("Contact {}", vault.payload.contacts.len() + 1);
+                        let label = format!("Contact {}", vault.payload.contacts.len() + 1);
                         let contact = StoredContact::new(code.0, label, seq);
                         vault.payload.contacts.push(contact);
                         let new_idx = vault.payload.contacts.len() - 1;

@@ -53,9 +53,7 @@ pub fn show(app: &mut Op4App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             for msg in messages {
                 // Filter by search query if active
-                if !query_lower.is_empty()
-                    && !msg.content.to_lowercase().contains(&query_lower)
-                {
+                if !query_lower.is_empty() && !msg.content.to_lowercase().contains(&query_lower) {
                     continue;
                 }
 
@@ -68,9 +66,7 @@ pub fn show(app: &mut Op4App, ui: &mut egui::Ui) {
                             .corner_radius(8.0)
                             .inner_margin(8.0);
                         frame.show(ui, |ui| {
-                            ui.label(
-                                egui::RichText::new(text).color(egui::Color32::WHITE),
-                            );
+                            ui.label(egui::RichText::new(text).color(egui::Color32::WHITE));
                         });
                     });
                 } else {
@@ -80,9 +76,7 @@ pub fn show(app: &mut Op4App, ui: &mut egui::Ui) {
                         .corner_radius(8.0)
                         .inner_margin(8.0);
                     frame.show(ui, |ui| {
-                        ui.label(
-                            egui::RichText::new(text).color(egui::Color32::LIGHT_GRAY),
-                        );
+                        ui.label(egui::RichText::new(text).color(egui::Color32::LIGHT_GRAY));
                     });
                 }
                 ui.add_space(4.0);
@@ -103,8 +97,7 @@ pub fn show(app: &mut Op4App, ui: &mut egui::Ui) {
             .add_sized([64.0, 36.0], egui::Button::new("Send"))
             .clicked();
 
-        let enter_pressed =
-            response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        let enter_pressed = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
         if (send_clicked || enter_pressed) && !app.draft.is_empty() {
             let draft = app.draft.clone();
