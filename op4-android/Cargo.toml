@@ -28,7 +28,7 @@ safelog = "0.8"
 futures = "0.3"
 rand = "0.8"
 hkdf = "0.12"
-sha2 = "0.10"
+sha2 = "0.11"
 
 eframe = { version = "0.33", features = ["wgpu"] }
 qrcode = "0.14"

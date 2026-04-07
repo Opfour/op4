@@ -20,7 +20,7 @@ op4-core = { version = "0.3.0", path = "../op4-core" }
 # Tor transport
 tokio            = { version = "1.50.0", features = ["rt-multi-thread", "sync", "time", "io-util", "net", "fs", "macros"] }
 hkdf             = "0.12.4"
-sha2             = "0.10.8"
+sha2             = "0.11.0"
 
 # TUI
 ratatui          = "0.30.0"
@@ -55,5 +55,5 @@ insta            = "1"
 tempfile         = "3"
 
 [build-dependencies]
-sha2             = "0.10.8"
+sha2             = "0.11.0"
 walkdir          = "2.5.0"
