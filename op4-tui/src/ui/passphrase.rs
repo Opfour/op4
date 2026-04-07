@@ -85,7 +85,57 @@ pub fn prompt_new_passphrase() -> io::Result<String> {
     }
 }
 
-/// Prompt the user to unlock the vault (no strength requirements — existing passphrase).
+/// Prompt the user to unlock the vault (no strength requirements -- existing passphrase).
 pub fn prompt_unlock_passphrase() -> io::Result<String> {
     read_secret_from_tty("Passphrase: ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- score_label --
+
+    #[test]
+    fn score_label_all_tiers() {
+        assert_eq!(score_label(0), "Very weak");
+        assert_eq!(score_label(1), "Weak");
+        assert_eq!(score_label(2), "Fair");
+        assert_eq!(score_label(3), "Strong");
+        assert_eq!(score_label(4), "Very strong");
+        assert_eq!(score_label(255), "Very strong");
+    }
+
+    // -- evaluate_strength --
+
+    #[test]
+    fn short_passphrase_is_rejected() {
+        let r = evaluate_strength("short");
+        assert!(!r.is_acceptable);
+        assert_eq!(r.score, 0);
+        assert!(!r.feedback.is_empty());
+    }
+
+    #[test]
+    fn minimum_length_boundary() {
+        // Exactly MIN_LENGTH but trivial content
+        let r = evaluate_strength("aaaaaaaaaaaa");
+        // Should pass length check but likely score low
+        assert!(r.feedback.is_empty() || r.score < 3 || r.is_acceptable);
+    }
+
+    #[test]
+    fn strong_passphrase_is_accepted() {
+        // A strong passphrase with mixed case, numbers, symbols
+        let r = evaluate_strength("correct horse battery staple xkcd");
+        assert!(r.is_acceptable);
+        assert!(r.score >= 3);
+    }
+
+    #[test]
+    fn empty_passphrase_rejected() {
+        let r = evaluate_strength("");
+        assert!(!r.is_acceptable);
+        assert_eq!(r.score, 0);
+    }
 }

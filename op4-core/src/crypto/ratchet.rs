@@ -23,11 +23,19 @@ pub struct SerializableRatchetState {
     pub ns: u64,
     pub nr: u64,
     pub pn: u64,
+    /// Total messages received (monotonic, never resets). For skipped key TTL.
+    #[serde(default)]
+    pub total_recv: u64,
     /// Flattened form of the skipped-key HashMap.
     pub mkskipped: Vec<(SkippedKeyIndex, [u8; 32])>,
 }
 
 const MAX_SKIP: u64 = 100;
+
+/// Maximum age of a skipped message key in terms of total messages received.
+/// After this many messages have been received since the key was stored,
+/// the skipped key is purged (the original message is considered lost).
+const SKIPPED_KEY_MAX_AGE: u64 = 500;
 
 // ─── Chain and Message Keys ───────────────────────────────────────────────────
 
@@ -89,11 +97,31 @@ pub struct MessageHeader {
 // ─── Ratchet State ────────────────────────────────────────────────────────────
 
 /// Index for a skipped message key in the out-of-order buffer.
-#[derive(Hash, Eq, PartialEq, Clone, Serialize, Deserialize)]
+/// Hash and Eq are based on (dh_ratchet_pub, msg_num) only -- stored_at is metadata.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SkippedKeyIndex {
     pub dh_ratchet_pub: [u8; 32],
     pub msg_num: u64,
+    /// Total messages received when this key was stored. Used for TTL-based expiry.
+    /// Defaults to 0 for backward compatibility with older serialized state.
+    #[serde(default)]
+    pub stored_at: u64,
 }
+
+impl std::hash::Hash for SkippedKeyIndex {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.dh_ratchet_pub.hash(state);
+        self.msg_num.hash(state);
+    }
+}
+
+impl PartialEq for SkippedKeyIndex {
+    fn eq(&self, other: &Self) -> bool {
+        self.dh_ratchet_pub == other.dh_ratchet_pub && self.msg_num == other.msg_num
+    }
+}
+
+impl Eq for SkippedKeyIndex {}
 
 /// Full Double Ratchet state for one conversation.
 /// Persisted (encrypted) after every send/receive operation.
@@ -112,6 +140,10 @@ pub struct RatchetState {
     ns: u64, // monotonic send counter
     nr: u64, // monotonic recv counter
     pn: u64, // previous sending chain length
+
+    /// Total messages received across all DH ratchet steps (never resets).
+    /// Used for TTL-based expiry of skipped message keys.
+    total_recv: u64,
 
     // Out-of-order message key buffer (bounded to MAX_SKIP)
     #[zeroize(skip)]
@@ -138,6 +170,7 @@ impl RatchetState {
             ns: 0,
             nr: 0,
             pn: 0,
+            total_recv: 0,
             mkskipped: HashMap::new(),
         })
     }
@@ -155,6 +188,7 @@ impl RatchetState {
             ns: 0,
             nr: 0,
             pn: 0,
+            total_recv: 0,
             mkskipped: HashMap::new(),
         }
     }
@@ -177,6 +211,7 @@ impl RatchetState {
             ns: self.ns,
             nr: self.nr,
             pn: self.pn,
+            total_recv: self.total_recv,
             mkskipped: self
                 .mkskipped
                 .iter()
@@ -197,6 +232,7 @@ impl RatchetState {
             ns: s.ns,
             nr: s.nr,
             pn: s.pn,
+            total_recv: s.total_recv,
             mkskipped: s
                 .mkskipped
                 .into_iter()
@@ -258,10 +294,13 @@ impl RatchetState {
         let skip_idx = SkippedKeyIndex {
             dh_ratchet_pub: header.dh_pub,
             msg_num: header.n,
+            stored_at: 0, // not used for lookup (Hash/Eq ignores stored_at)
         };
         if let Some(mk) = self.mkskipped.remove(&skip_idx) {
             let (aead_key, mac_key_bytes) = split_message_key(&mk)?;
             let pt = aead_decrypt(&aead_key, ciphertext, &aad)?;
+            self.total_recv += 1;
+            self.purge_expired_skipped_keys();
             return Ok((pt, mac_key_bytes));
         }
 
@@ -284,7 +323,15 @@ impl RatchetState {
 
         let (aead_key, mac_key_bytes) = split_message_key(&mk)?;
         let pt = aead_decrypt(&aead_key, ciphertext, &aad)?;
+        self.total_recv += 1;
+        self.purge_expired_skipped_keys();
         Ok((pt, mac_key_bytes))
+    }
+
+    /// Remove skipped message keys that have exceeded their TTL.
+    fn purge_expired_skipped_keys(&mut self) {
+        let cutoff = self.total_recv.saturating_sub(SKIPPED_KEY_MAX_AGE);
+        self.mkskipped.retain(|idx, _| idx.stored_at >= cutoff);
     }
 
     /// Buffer skipped message keys up to `until`, bounded by MAX_SKIP.
@@ -298,6 +345,7 @@ impl RatchetState {
             let idx = SkippedKeyIndex {
                 dh_ratchet_pub: self.dhr.as_ref().ok_or(CryptoError::NoDhrKey)?.to_bytes(),
                 msg_num: self.nr,
+                stored_at: self.total_recv,
             };
             self.mkskipped.insert(idx, mk);
             self.ckr = Some(next_ck);
@@ -433,5 +481,107 @@ mod tests {
         assert_eq!(mac1, mac2);
         // AEAD key and MAC key must be different
         assert_ne!(aead1.0, mac1);
+    }
+
+    #[test]
+    fn out_of_order_messages_decrypt_correctly() {
+        let (mut alice, mut bob) = make_pair();
+
+        // Alice sends 3 messages
+        let (hdr0, ct0, _) = alice.ratchet_encrypt(b"msg-0").unwrap();
+        let (hdr1, ct1, _) = alice.ratchet_encrypt(b"msg-1").unwrap();
+        let (hdr2, ct2, _) = alice.ratchet_encrypt(b"msg-2").unwrap();
+
+        // Bob decrypts in reverse order (2, 0, 1)
+        let (pt2, _) = bob.ratchet_decrypt(&hdr2, &ct2).unwrap();
+        assert_eq!(pt2, b"msg-2");
+
+        let (pt0, _) = bob.ratchet_decrypt(&hdr0, &ct0).unwrap();
+        assert_eq!(pt0, b"msg-0");
+
+        let (pt1, _) = bob.ratchet_decrypt(&hdr1, &ct1).unwrap();
+        assert_eq!(pt1, b"msg-1");
+    }
+
+    #[test]
+    fn serializable_roundtrip_preserves_skipped_keys() {
+        let (mut alice, mut bob) = make_pair();
+
+        // Alice sends 3, Bob only decrypts the 3rd -- skips 0 and 1
+        let (_hdr0, _ct0, _) = alice.ratchet_encrypt(b"skip-0").unwrap();
+        let (_hdr1, _ct1, _) = alice.ratchet_encrypt(b"skip-1").unwrap();
+        let (hdr2, ct2, _) = alice.ratchet_encrypt(b"take-2").unwrap();
+        let (pt, _) = bob.ratchet_decrypt(&hdr2, &ct2).unwrap();
+        assert_eq!(pt, b"take-2");
+
+        // Bob should have 2 skipped keys buffered
+        let s = bob.to_serializable();
+        assert_eq!(s.mkskipped.len(), 2);
+
+        // Roundtrip through serialization
+        let bob2 = RatchetState::from_serializable(s);
+        let s2 = bob2.to_serializable();
+        assert_eq!(s2.mkskipped.len(), 2);
+    }
+
+    #[test]
+    fn our_ratchet_pub_returns_32_bytes() {
+        let (alice, _) = make_pair();
+        let pub_key = alice.our_ratchet_pub();
+        assert_ne!(pub_key, [0u8; 32]);
+    }
+
+    #[test]
+    fn kdf_ck_produces_distinct_keys() {
+        let ck = ChainKey([0xAAu8; 32]);
+        let (mk, next_ck) = kdf_ck(&ck);
+        assert_ne!(mk.0, ck.0);
+        assert_ne!(next_ck.0, ck.0);
+        assert_ne!(mk.0, next_ck.0);
+    }
+
+    #[test]
+    fn skipped_keys_expire_after_ttl() {
+        let (mut alice, mut bob) = make_pair();
+
+        // Alice sends 3 messages; Bob only receives the 3rd (skipping 0 and 1)
+        let (hdr0, ct0, _) = alice.ratchet_encrypt(b"msg-0").unwrap();
+        let (_hdr1, _ct1, _) = alice.ratchet_encrypt(b"msg-1").unwrap();
+        let (hdr2, ct2, _) = alice.ratchet_encrypt(b"msg-2").unwrap();
+
+        let (pt2, _) = bob.ratchet_decrypt(&hdr2, &ct2).unwrap();
+        assert_eq!(pt2, b"msg-2");
+        // Bob has 2 skipped keys stored
+        assert_eq!(bob.mkskipped.len(), 2);
+
+        // Simulate receiving SKIPPED_KEY_MAX_AGE more messages to expire them.
+        // We do this by artificially advancing total_recv and purging.
+        bob.total_recv += SKIPPED_KEY_MAX_AGE + 1;
+        bob.purge_expired_skipped_keys();
+        assert_eq!(bob.mkskipped.len(), 0, "skipped keys should be purged after TTL");
+
+        // The expired skipped key should no longer decrypt
+        assert!(bob.ratchet_decrypt(&hdr0, &ct0).is_err());
+    }
+
+    #[test]
+    fn total_recv_increments_on_each_decrypt() {
+        let (mut alice, mut bob) = make_pair();
+        assert_eq!(bob.total_recv, 0);
+
+        for i in 0..5u8 {
+            let (hdr, ct, _) = alice.ratchet_encrypt(&[i]).unwrap();
+            bob.ratchet_decrypt(&hdr, &ct).unwrap();
+        }
+        assert_eq!(bob.total_recv, 5);
+    }
+
+    #[test]
+    fn kdf_rk_produces_new_root_and_chain() {
+        let rk = [0xBBu8; 32];
+        let dh = [0xCCu8; 32];
+        let (new_rk, new_ck) = kdf_rk(&rk, &dh).unwrap();
+        assert_ne!(new_rk, rk);
+        assert_ne!(new_ck.0, [0u8; 32]);
     }
 }

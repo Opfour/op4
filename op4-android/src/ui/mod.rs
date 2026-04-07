@@ -267,10 +267,10 @@ impl eframe::App for Op4App {
         }
 
         // Reload messages if selected contact changed
-        if self.screen == Screen::Main && self.tab == Tab::Conversation {
-            if Some(self.selected_contact) != self.loaded_contact_idx {
-                self.reload_messages();
-            }
+        if self.screen == Screen::Main && self.tab == Tab::Conversation
+            && Some(self.selected_contact) != self.loaded_contact_idx
+        {
+            self.reload_messages();
         }
 
         // Touch-friendly spacing
@@ -383,6 +383,7 @@ fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
         ratchet_pub,
         vault.payload.nym_address.clone(),
         vault.payload.opk_public_keys(),
+        vault.payload.opk_ids(),
     ))
 }
 
@@ -624,9 +625,10 @@ fn handle_inbound_handshake(app: &mut Op4App, hs_bytes: &[u8]) {
             Err(_) => return,
         };
 
-    if let Some(idx) = consumed_opk {
+    if let Some(ref id) = consumed_opk {
         if let Some(vault) = app.vault.as_mut() {
-            vault.payload.consume_opk(idx);
+            vault.payload.consume_opk_by_id(id);
+            vault.payload.replenish_opks_if_needed();
         }
     }
 

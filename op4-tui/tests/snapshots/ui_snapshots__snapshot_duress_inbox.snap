@@ -1,0 +1,16 @@
+---
+source: op4-tui/tests/ui_snapshots.rs
+expression: output
+---
+┌Contacts───────────┐┌Alex───────────────────────────────────────────┐
+│Alex               ││Alex [#000001]: Hey, are you free tonight?     │
+│Sam                ││You   [#000002]: Yeah, what's up?              │
+│Work Group         ││Alex [#000003]: Want to grab dinner?           │
+│                   ││You   [#000004]: Sure, sounds good.            │
+│                   ││                                               │
+│                   ││                                               │
+│                   ││                                               │
+│                   ││                                               │
+│                   ││                                               │
+│                   ││                                               │
+└───────────────────┘└───────────────────────────────────────────────┘

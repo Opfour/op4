@@ -3,7 +3,12 @@ name = "op4-tui"
 version = "0.3.0"
 edition = "2021"
 rust-version = "1.88"
+license = "GPL-3.0-or-later"
 publish = false
+
+[lib]
+name = "op4_tui"
+path = "src/lib.rs"
 
 [[bin]]
 name = "op4"
@@ -44,6 +49,10 @@ zeroize          = { version = "1.8.2", features = ["derive", "serde"] }
 # OS hardening
 seccompiler      = "0.5.0"
 libc             = "0.2.153"
+
+[dev-dependencies]
+insta            = "1"
+tempfile         = "3"
 
 [build-dependencies]
 sha2             = "0.10.8"

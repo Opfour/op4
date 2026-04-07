@@ -39,14 +39,13 @@ fn show_contact_list(app: &mut Op4App, ui: &mut egui::Ui) {
             app.contact_mode = ContactMode::ExportCode;
         }
         let pending = app.pending_handshakes.len();
-        if pending > 0 {
-            if ui
+        if pending > 0
+            && ui
                 .button(format!("Pending ({pending})"))
                 .clicked()
-            {
-                app.contact_mode = ContactMode::PendingRequest;
-                app.pending_name_buf.clear();
-            }
+        {
+            app.contact_mode = ContactMode::PendingRequest;
+            app.pending_name_buf.clear();
         }
     });
 

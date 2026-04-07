@@ -1,0 +1,19 @@
+---
+source: op4-tui/tests/ui_snapshots.rs
+expression: output
+---
+┌ Alice ───────────────────────────────────────────────────┐
+│[#000001] Them Hey, how are you?                          │
+│[#000002] You  Good, you?                                 │
+│[#000003] Them Great, thanks!                             │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+│                                                          │
+└──────────────────────────────────────────────────────────┘
+┌Message (Enter to send, Esc to cancel, /:search)──────────┐
+│typing a reply...                                         │
+└──────────────────────────────────────────────────────────┘

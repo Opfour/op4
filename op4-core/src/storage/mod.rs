@@ -25,3 +25,22 @@ pub fn get_vault_path() -> io::Result<PathBuf> {
 pub fn get_vault_path_android(internal_data_path: &std::path::Path) -> PathBuf {
     internal_data_path.join("vault.op4")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_vault_path_ends_with_vault_op4() {
+        let path = get_vault_path().expect("should resolve vault path");
+        assert!(path.ends_with("op4/vault.op4"));
+        assert!(path.is_absolute());
+    }
+
+    #[test]
+    fn get_vault_path_contains_local_share() {
+        let path = get_vault_path().expect("should resolve vault path");
+        let s = path.to_string_lossy();
+        assert!(s.contains(".local/share/op4"));
+    }
+}
