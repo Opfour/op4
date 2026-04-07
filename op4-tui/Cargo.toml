@@ -15,7 +15,7 @@ name = "op4"
 path = "src/main.rs"
 
 [dependencies]
-op4-core = { path = "../op4-core" }
+op4-core = { version = "0.3.0", path = "../op4-core" }
 
 # Tor transport
 tokio            = { version = "1.50.0", features = ["rt-multi-thread", "sync", "time", "io-util", "net", "fs", "macros"] }
