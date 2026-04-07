@@ -18,7 +18,11 @@ pub trait Transport: Send {
     fn address(&self) -> &str;
 
     /// Enqueue an encrypted payload for delivery to `recipient_addr`.
-    fn send(&self, recipient_addr: &str, payload: Vec<u8>) -> Result<(), crate::error::NetworkError>;
+    fn send(
+        &self,
+        recipient_addr: &str,
+        payload: Vec<u8>,
+    ) -> Result<(), crate::error::NetworkError>;
 
     /// Enqueue a payload and return a oneshot receiver that resolves to `true`
     /// when the TCP connection succeeds or `false` on failure. Callers poll

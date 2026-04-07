@@ -19,18 +19,18 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use arti_client::{TorClient, config::TorClientConfigBuilder};
+use arti_client::{config::TorClientConfigBuilder, TorClient};
 use futures::StreamExt;
 use safelog::DisplayRedacted;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tor_cell::relaycell::msg::Connected;
-use tor_hsservice::{OnionServiceConfig, handle_rend_requests};
+use tor_hsservice::{handle_rend_requests, OnionServiceConfig};
 use tor_rtcompat::PreferredRuntime;
 
 use op4_core::error::NetworkError;
-use op4_core::network::{IncomingMessage, Transport};
 use op4_core::network::message::make_dummy_message;
+use op4_core::network::{IncomingMessage, Transport};
 
 /// Listening port advertised in the onion service (same as TUI for compatibility).
 const LISTEN_PORT: u16 = 14101;
@@ -98,10 +98,7 @@ impl ArtiTransport {
         let onion_addr = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 if let Some(hs_id) = service.onion_address() {
-                    return format!(
-                        "{}:{LISTEN_PORT}",
-                        hs_id.display_unredacted()
-                    );
+                    return format!("{}:{LISTEN_PORT}", hs_id.display_unredacted());
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
             }

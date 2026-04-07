@@ -6,8 +6,8 @@ use ratatui::{
     Frame,
 };
 
-use op4_core::storage::vault::StoredMessage;
 use crate::ui::input::sanitize_for_display;
+use op4_core::storage::vault::StoredMessage;
 
 /// Render the conversation view for a contact.
 ///

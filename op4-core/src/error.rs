@@ -218,8 +218,7 @@ mod tests {
 
     #[test]
     fn app_error_is_std_error() {
-        let e: Box<dyn std::error::Error> =
-            Box::new(AppError::Crypto(CryptoError::HkdfExpand));
+        let e: Box<dyn std::error::Error> = Box::new(AppError::Crypto(CryptoError::HkdfExpand));
         assert!(!e.to_string().is_empty());
     }
 

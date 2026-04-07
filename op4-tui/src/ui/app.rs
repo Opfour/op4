@@ -12,6 +12,15 @@ use ratatui::{
 };
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
+use crate::network::nym_client::NymClient;
+use crate::ui::{
+    contacts::{render_contacts, render_fingerprint_panel, render_key_change_alert},
+    conversation::render_conversation,
+    duress::render_duress_inbox,
+    input::sanitize_for_display,
+    qr::{qr_lines, qr_terminal_height, qr_terminal_width},
+    settings::render_settings,
+};
 use op4_core::crypto::handshake::{
     perform_handshake_alice, perform_handshake_bob, HandshakeInitMessage,
 };
@@ -23,18 +32,9 @@ use op4_core::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use op4_core::identity::revocation::{RevocationCertificate, RevocationReason};
 use op4_core::network::message::{WireMessage, WireMessageType};
 use op4_core::storage::vault::{PendingOutbound, StoredMessage, VaultUnlocked};
-use tokio::sync::oneshot;
-use crate::network::nym_client::NymClient;
-use crate::ui::{
-    contacts::{render_contacts, render_fingerprint_panel, render_key_change_alert},
-    conversation::render_conversation,
-    duress::render_duress_inbox,
-    input::sanitize_for_display,
-    qr::{qr_lines, qr_terminal_height, qr_terminal_width},
-    settings::render_settings,
-};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -1630,7 +1630,11 @@ fn flush_outbox(app: &mut AppState, vault: &mut VaultUnlocked, nym: &mut NymClie
             }
         }
 
-        to_send.push((idx, entry.recipient_addr.clone(), entry.wire_payload.clone()));
+        to_send.push((
+            idx,
+            entry.recipient_addr.clone(),
+            entry.wire_payload.clone(),
+        ));
     }
 
     for (idx, addr, payload) in to_send {
@@ -1799,11 +1803,15 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
     };
 
     // Complete the handshake as the responder.
-    let (plaintext, session_key, consumed_opk) =
-        match perform_handshake_bob(&our_kem, &bob_ratchet_secret, &vault.payload.opk_secrets, &hs_msg) {
-            Ok(r) => r,
-            Err(_) => return, // MAC or decryption failure
-        };
+    let (plaintext, session_key, consumed_opk) = match perform_handshake_bob(
+        &our_kem,
+        &bob_ratchet_secret,
+        &vault.payload.opk_secrets,
+        &hs_msg,
+    ) {
+        Ok(r) => r,
+        Err(_) => return, // MAC or decryption failure
+    };
 
     // Delete consumed one-time prekey from the vault by ID.
     if let Some(ref id) = consumed_opk {

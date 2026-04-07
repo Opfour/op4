@@ -215,7 +215,14 @@ impl PublicKeyBundle {
         ratchet_pub: [u8; 32],
         nym_address: String,
     ) -> Self {
-        Self::from_keypairs_with_opks(kem, signing, ratchet_pub, nym_address, Vec::new(), Vec::new())
+        Self::from_keypairs_with_opks(
+            kem,
+            signing,
+            ratchet_pub,
+            nym_address,
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     /// Build a bundle with one-time prekey public keys and their IDs included.
