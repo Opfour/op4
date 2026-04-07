@@ -112,7 +112,7 @@ jobs:
 
       - name: Verify README release hash is current
         run: |
-          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          VERSION=$(grep '^version' op4-tui/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           BINARY_HASH=$(./target/release/op4 --print-hash)
           EXPECTED_ROW="| \`${VERSION}\` | \`${BINARY_HASH}\` |"
           if grep -qF "| \`${VERSION}\` | \`${BINARY_HASH}\` |" README.md; then
