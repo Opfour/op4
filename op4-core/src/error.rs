@@ -148,3 +148,137 @@ impl From<CryptoError> for VaultError {
         VaultError::Crypto(e)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- Display impls ----
+
+    #[test]
+    fn hardening_error_display_is_generic() {
+        // All variants must produce the same opaque message.
+        let variants: Vec<HardeningError> = vec![
+            HardeningError::PrctlFailed(1),
+            HardeningError::SetrlimitFailed(2),
+            HardeningError::SeccompBuild("x".into()),
+            HardeningError::SeccompInstall("y".into()),
+            HardeningError::DebuggerDetected,
+            HardeningError::InjectionDetected,
+            HardeningError::IntegrityCheckFailed,
+            HardeningError::ApkSignatureMismatch,
+            HardeningError::EntropyUnavailable,
+        ];
+        for v in variants {
+            assert_eq!(v.to_string(), "security check failed");
+        }
+    }
+
+    #[test]
+    fn app_error_display_crypto() {
+        let e = AppError::Crypto(CryptoError::AeadDecrypt);
+        assert!(e.to_string().starts_with("crypto error:"));
+    }
+
+    #[test]
+    fn app_error_display_vault() {
+        let e = AppError::Vault(VaultError::InvalidPassphrase);
+        assert!(e.to_string().starts_with("vault error:"));
+    }
+
+    #[test]
+    fn app_error_display_network() {
+        let e = AppError::Network(NetworkError::TorUnavailable);
+        assert!(e.to_string().starts_with("network error:"));
+    }
+
+    #[test]
+    fn app_error_display_identity() {
+        let e = AppError::Identity(IdentityError::InvalidBase58);
+        assert!(e.to_string().starts_with("identity error:"));
+    }
+
+    #[test]
+    fn app_error_display_hardening() {
+        let e = AppError::Hardening(HardeningError::DebuggerDetected);
+        assert!(e.to_string().starts_with("hardening error:"));
+    }
+
+    #[test]
+    fn app_error_display_io() {
+        let e = AppError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
+        assert!(e.to_string().starts_with("I/O error:"));
+    }
+
+    #[test]
+    fn app_error_display_postcard() {
+        let e = AppError::Postcard(postcard::Error::SerializeBufferFull);
+        assert!(e.to_string().starts_with("serialization error:"));
+    }
+
+    #[test]
+    fn app_error_is_std_error() {
+        let e: Box<dyn std::error::Error> =
+            Box::new(AppError::Crypto(CryptoError::HkdfExpand));
+        assert!(!e.to_string().is_empty());
+    }
+
+    // ---- From impls ----
+
+    #[test]
+    fn from_io_error_for_app_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe");
+        let app: AppError = io_err.into();
+        assert!(matches!(app, AppError::Io(_)));
+    }
+
+    #[test]
+    fn from_postcard_error_for_app_error() {
+        let pc_err = postcard::Error::SerializeBufferFull;
+        let app: AppError = pc_err.into();
+        assert!(matches!(app, AppError::Postcard(_)));
+    }
+
+    #[test]
+    fn from_crypto_error_for_app_error() {
+        let app: AppError = CryptoError::AeadEncrypt.into();
+        assert!(matches!(app, AppError::Crypto(_)));
+    }
+
+    #[test]
+    fn from_vault_error_for_app_error() {
+        let app: AppError = VaultError::InvalidMagic.into();
+        assert!(matches!(app, AppError::Vault(_)));
+    }
+
+    #[test]
+    fn from_network_error_for_app_error() {
+        let app: AppError = NetworkError::TorUnavailable.into();
+        assert!(matches!(app, AppError::Network(_)));
+    }
+
+    #[test]
+    fn from_identity_error_for_app_error() {
+        let app: AppError = IdentityError::InvalidFormat.into();
+        assert!(matches!(app, AppError::Identity(_)));
+    }
+
+    #[test]
+    fn from_hardening_error_for_app_error() {
+        let app: AppError = HardeningError::EntropyUnavailable.into();
+        assert!(matches!(app, AppError::Hardening(_)));
+    }
+
+    #[test]
+    fn from_io_error_for_vault_error() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "missing");
+        let ve: VaultError = io_err.into();
+        assert!(matches!(ve, VaultError::Io(_)));
+    }
+
+    #[test]
+    fn from_crypto_error_for_vault_error() {
+        let ve: VaultError = CryptoError::KeyParse.into();
+        assert!(matches!(ve, VaultError::Crypto(_)));
+    }
+}

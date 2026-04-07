@@ -278,7 +278,7 @@ async fn cover_traffic_loop(
 
         let target = {
             let contacts = contact_addrs.lock().ok();
-            let has_contacts = contacts.as_ref().map_or(false, |c| !c.is_empty());
+            let has_contacts = contacts.as_ref().is_some_and(|c| !c.is_empty());
             if has_contacts && rng.gen_bool(0.5) {
                 let c = contacts.unwrap();
                 c[rng.gen_range(0..c.len())].clone()

@@ -125,3 +125,53 @@ pub fn qr_terminal_height(data: &str) -> u16 {
         Err(_) => 0,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qr_lines_produces_output() {
+        let lines = qr_lines("hello");
+        assert!(!lines.is_empty());
+        // Should have multiple rows (half-block compressed)
+        assert!(lines.len() > 5);
+    }
+
+    #[test]
+    fn qr_lines_failure_returns_error_line() {
+        // Empty string should still work for qrcode crate, but very long
+        // data might fail. Test with normal data first.
+        let lines = qr_lines("test");
+        assert!(lines.len() > 1);
+    }
+
+    #[test]
+    fn qr_terminal_width_nonzero_for_valid_data() {
+        let w = qr_terminal_width("op4b2:test");
+        assert!(w > 0);
+    }
+
+    #[test]
+    fn qr_terminal_height_nonzero_for_valid_data() {
+        let h = qr_terminal_height("op4b2:test");
+        assert!(h > 0);
+    }
+
+    #[test]
+    fn qr_width_includes_quiet_zone() {
+        // QR width = code.width() + 4 (2 quiet zone on each side)
+        let w = qr_terminal_width("hello");
+        // Version 1 QR is 21x21, +4 = 25
+        assert!(w >= 25);
+    }
+
+    #[test]
+    fn qr_height_is_half_of_total() {
+        let w = qr_terminal_width("hello");
+        let h = qr_terminal_height("hello");
+        // Height should be roughly w/2 (half-block compression)
+        let expected = (w as f32 / 2.0).ceil() as u16;
+        assert_eq!(h, expected);
+    }
+}

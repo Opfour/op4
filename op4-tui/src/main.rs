@@ -1,7 +1,3 @@
-mod hardening;
-mod network;
-mod ui;
-
 use std::io::{self, stdout};
 use std::path::PathBuf;
 
@@ -14,10 +10,10 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use op4_core::crypto::keys::{HybridKemKeypair, HybridSigningKeypair};
 use op4_core::error::{AppError, VaultError};
 use op4_core::storage::vault::VaultUnlocked;
-use crate::hardening::memory::apply_memory_hardening;
-use crate::hardening::seccomp::install_seccomp_filter;
-use crate::network::nym_client::NymClient;
-use crate::ui::passphrase::{prompt_new_passphrase, prompt_unlock_passphrase};
+use op4_tui::hardening::memory::apply_memory_hardening;
+use op4_tui::hardening::seccomp::install_seccomp_filter;
+use op4_tui::network::nym_client::NymClient;
+use op4_tui::ui::passphrase::{prompt_new_passphrase, prompt_unlock_passphrase};
 use rand::rngs::OsRng;
 use x25519_dalek::StaticSecret;
 use zeroize::Zeroizing;
@@ -127,7 +123,7 @@ async fn main() {
     // ── 8. TUI event loop ─────────────────────────────────────────────────
     // block_in_place: signals tokio to reschedule other async tasks to worker
     // threads while this thread runs the synchronous TUI loop.
-    let result = tokio::task::block_in_place(|| ui::app::run(&mut terminal, vault, &mut nym));
+    let result = tokio::task::block_in_place(|| op4_tui::ui::app::run(&mut terminal, vault, &mut nym));
 
     // ── 9. Restore terminal unconditionally ───────────────────────────────
     restore_terminal(&mut terminal);

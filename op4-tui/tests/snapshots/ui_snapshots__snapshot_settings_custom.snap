@@ -1,0 +1,18 @@
+---
+source: op4-tui/tests/ui_snapshots.rs
+expression: output
+---
+┌Settings────────────────────────────────────────┐
+│Tor SOCKS5 address: 127.0.0.1:9150              │
+│Nym gateway: gw.example.com                     │
+│Auto-delete after: 50 messages                  │
+│Rotate identity keys                            │
+│Revoke & announce key change                    │
+│Export my contact code                          │
+│Refresh Tor circuit (SIGNAL NEWNYM)             │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+└────────────────────────────────────────────────┘

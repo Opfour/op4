@@ -18,3 +18,33 @@ pub fn restrict_vault_permissions(path: &Path) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn restrict_vault_permissions_sets_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.vault");
+        std::fs::write(&path, b"data").unwrap();
+
+        // Start with permissive mode
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        restrict_vault_permissions(&path);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    #[test]
+    fn restrict_vault_permissions_nonexistent_file_no_panic() {
+        let path = Path::new("/tmp/nonexistent_op4_test_file");
+        // Should not panic, just silently do nothing
+        restrict_vault_permissions(path);
+    }
+}

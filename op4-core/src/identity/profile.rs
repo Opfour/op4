@@ -286,4 +286,49 @@ mod tests {
         let c2 = StoredContact::new(make_bundle(), "B".into(), 0);
         assert_ne!(c1.id, c2.id);
     }
+
+    // ── ContactCode helpers ──────────────────────────────────────────────────
+
+    #[test]
+    fn contact_code_bundle_returns_inner() {
+        let bundle = make_bundle();
+        let cc = ContactCode(bundle.clone());
+        assert_eq!(cc.bundle().nym_address, bundle.nym_address);
+        assert_eq!(cc.bundle().x25519_pub, bundle.x25519_pub);
+    }
+
+    #[test]
+    fn contact_code_fingerprint_matches_bundle_fingerprint() {
+        let bundle = make_bundle();
+        let expected = bundle.fingerprint();
+        let cc = ContactCode(bundle);
+        assert_eq!(cc.fingerprint(), expected);
+    }
+
+    // ── KeyChangeGuard ───────────────────────────────────────────────────────
+
+    #[test]
+    fn key_change_guard_allows_first_change() {
+        let mut g = KeyChangeGuard::new();
+        assert!(g.can_change_key());
+        assert!(g.record_change().is_ok());
+    }
+
+    #[test]
+    fn key_change_guard_blocks_rapid_second_change() {
+        let mut g = KeyChangeGuard::new();
+        g.record_change().unwrap();
+        assert!(!g.can_change_key());
+        let result = g.record_change();
+        assert!(matches!(
+            result,
+            Err(IdentityError::KeyChangeTooFrequent)
+        ));
+    }
+
+    #[test]
+    fn key_change_guard_default_impl() {
+        let g = KeyChangeGuard::default();
+        assert!(g.can_change_key());
+    }
 }

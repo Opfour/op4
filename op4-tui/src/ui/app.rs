@@ -334,6 +334,7 @@ fn build_our_bundle(vault: &VaultUnlocked) -> Option<PublicKeyBundle> {
         ratchet_pub,
         vault.payload.nym_address.clone(),
         vault.payload.opk_public_keys(),
+        vault.payload.opk_ids(),
     ))
 }
 
@@ -1804,9 +1805,10 @@ fn handle_inbound_handshake(app: &mut AppState, vault: &mut VaultUnlocked, hs_by
             Err(_) => return, // MAC or decryption failure
         };
 
-    // Delete consumed one-time prekey from the vault.
-    if let Some(idx) = consumed_opk {
-        vault.payload.consume_opk(idx);
+    // Delete consumed one-time prekey from the vault by ID.
+    if let Some(ref id) = consumed_opk {
+        vault.payload.consume_opk_by_id(id);
+        vault.payload.replenish_opks_if_needed();
     }
 
     // Identify the sender by their Ed25519 verifying key.

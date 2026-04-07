@@ -17,6 +17,8 @@ use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 const VAULT_MAGIC: &[u8; 4] = b"OP4V";
 /// Number of one-time prekeys to generate per batch.
 pub const OPK_BATCH_SIZE: usize = 10;
+/// When the OPK pool drops to this size or below, generate a new batch.
+pub const OPK_REPLENISH_THRESHOLD: usize = 3;
 /// Version 2 adds 8-byte section-length prefix fields to the header so that
 /// AEAD decryption operates on the exact ciphertext bytes rather than the
 /// padded section.  This fixes duress-passphrase decryption after the first
@@ -134,11 +136,32 @@ impl VaultPayload {
             .collect()
     }
 
-    /// Remove a consumed OPK by index. Returns true if removed.
-    pub fn consume_opk(&mut self, index: u16) -> bool {
-        let idx = index as usize;
-        if idx < self.opk_secrets.len() {
-            self.opk_secrets.remove(idx);
+    /// Compute the 4-byte OPK ID for a given secret (SHA-256 of the public key, truncated).
+    pub fn opk_id_for_secret(secret: &[u8; 32]) -> [u8; 4] {
+        use sha2::{Digest, Sha256};
+        let public = X25519PublicKey::from(&StaticSecret::from(*secret)).to_bytes();
+        let hash = Sha256::digest(public);
+        [hash[0], hash[1], hash[2], hash[3]]
+    }
+
+    /// Compute OPK IDs for all current secrets (for inclusion in PublicKeyBundle).
+    pub fn opk_ids(&self) -> Vec<[u8; 4]> {
+        self.opk_secrets.iter().map(Self::opk_id_for_secret).collect()
+    }
+
+    /// Remove a consumed OPK by its 4-byte ID. Returns the secret if found.
+    pub fn consume_opk_by_id(&mut self, id: &[u8; 4]) -> Option<[u8; 32]> {
+        let pos = self.opk_secrets.iter().position(|s| {
+            &Self::opk_id_for_secret(s) == id
+        });
+        pos.map(|idx| self.opk_secrets.remove(idx))
+    }
+
+    /// Check if the OPK pool is at or below the replenishment threshold
+    /// and generate a new batch if so. Returns true if new OPKs were generated.
+    pub fn replenish_opks_if_needed(&mut self) -> bool {
+        if self.opk_secrets.len() <= OPK_REPLENISH_THRESHOLD {
+            self.generate_opks();
             true
         } else {
             false
@@ -714,5 +737,167 @@ mod tests {
             result,
             Err(VaultError::InvalidMagic) | Err(VaultError::Corrupt)
         ));
+    }
+
+    // ── OPK management ───────────────────────────────────────────────────────
+
+    #[test]
+    fn generate_opks_creates_batch() {
+        let mut payload = VaultPayload::default();
+        assert!(payload.opk_secrets.is_empty());
+        payload.generate_opks();
+        assert_eq!(payload.opk_secrets.len(), OPK_BATCH_SIZE);
+    }
+
+    #[test]
+    fn opk_public_keys_derive_from_secrets() {
+        let mut payload = VaultPayload::default();
+        payload.generate_opks();
+        let pubs = payload.opk_public_keys();
+        assert_eq!(pubs.len(), OPK_BATCH_SIZE);
+        // Each public key should be 32 bytes and non-zero
+        for pk in &pubs {
+            assert_ne!(pk, &[0u8; 32]);
+        }
+    }
+
+    #[test]
+    fn opk_public_keys_match_secrets() {
+        let mut payload = VaultPayload::default();
+        payload.generate_opks();
+        let pubs = payload.opk_public_keys();
+        for (secret, expected_pub) in payload.opk_secrets.iter().zip(pubs.iter()) {
+            let s = StaticSecret::from(*secret);
+            let p = X25519PublicKey::from(&s).to_bytes();
+            assert_eq!(&p, expected_pub);
+        }
+    }
+
+    #[test]
+    fn consume_opk_by_id_removes_correct_key() {
+        let mut payload = VaultPayload::default();
+        payload.generate_opks();
+        let target_secret = payload.opk_secrets[0];
+        let target_id = VaultPayload::opk_id_for_secret(&target_secret);
+        let original_len = payload.opk_secrets.len();
+
+        let removed = payload.consume_opk_by_id(&target_id);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap(), target_secret);
+        assert_eq!(payload.opk_secrets.len(), original_len - 1);
+        // The removed secret should no longer be in the pool
+        assert!(!payload.opk_secrets.contains(&target_secret));
+    }
+
+    #[test]
+    fn consume_opk_by_id_unknown_returns_none() {
+        let mut payload = VaultPayload::default();
+        payload.generate_opks();
+        let fake_id = [0xFF, 0xFF, 0xFF, 0xFF];
+        assert!(payload.consume_opk_by_id(&fake_id).is_none());
+        assert_eq!(payload.opk_secrets.len(), OPK_BATCH_SIZE);
+    }
+
+    #[test]
+    fn opk_ids_match_public_key_hashes() {
+        let mut payload = VaultPayload::default();
+        payload.generate_opks();
+        let ids = payload.opk_ids();
+        assert_eq!(ids.len(), OPK_BATCH_SIZE);
+        // Each ID should match the hash of the corresponding public key
+        for (secret, id) in payload.opk_secrets.iter().zip(ids.iter()) {
+            assert_eq!(&VaultPayload::opk_id_for_secret(secret), id);
+        }
+    }
+
+    #[test]
+    fn replenish_opks_generates_new_batch_when_low() {
+        let mut payload = VaultPayload::default();
+        payload.generate_opks();
+        // Drain to threshold
+        while payload.opk_secrets.len() > OPK_REPLENISH_THRESHOLD {
+            payload.opk_secrets.remove(0);
+        }
+        assert_eq!(payload.opk_secrets.len(), OPK_REPLENISH_THRESHOLD);
+        assert!(payload.replenish_opks_if_needed());
+        assert_eq!(payload.opk_secrets.len(), OPK_REPLENISH_THRESHOLD + OPK_BATCH_SIZE);
+    }
+
+    #[test]
+    fn replenish_opks_does_nothing_when_pool_full() {
+        let mut payload = VaultPayload::default();
+        payload.generate_opks();
+        assert!(!payload.replenish_opks_if_needed());
+        assert_eq!(payload.opk_secrets.len(), OPK_BATCH_SIZE);
+    }
+
+    // ── AppSettings ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn app_settings_default_values() {
+        let s = AppSettings::default();
+        assert_eq!(s.tor_socks_addr, "127.0.0.1:9050");
+        assert!(s.nym_gateway.is_none());
+        assert!(s.default_auto_delete.is_none());
+    }
+
+    // ── Message persistence ──────────────────────────────────────────────────
+
+    #[test]
+    fn save_and_load_messages_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+        let mut vault = create_test_vault(&path, b"pass", b"duress");
+
+        let contact_id = [0xAAu8; 32];
+        let msgs = vec![
+            StoredMessage { counter: 1, content: "hello".into(), from_us: true },
+            StoredMessage { counter: 2, content: "world".into(), from_us: false },
+        ];
+        vault.save_messages(&contact_id, &msgs).unwrap();
+
+        let loaded = vault.load_messages(&contact_id);
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].content, "hello");
+        assert_eq!(loaded[1].content, "world");
+        assert!(loaded[0].from_us);
+        assert!(!loaded[1].from_us);
+    }
+
+    #[test]
+    fn load_messages_returns_empty_for_unknown_contact() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+        let vault = create_test_vault(&path, b"pass", b"duress");
+        let loaded = vault.load_messages(&[0xBBu8; 32]);
+        assert!(loaded.is_empty());
+    }
+
+    // ── Conversation management ──────────────────────────────────────────────
+
+    #[test]
+    fn get_or_create_conversation_creates_on_first_call() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+        let mut vault = create_test_vault(&path, b"pass", b"duress");
+
+        let cid = [0xCCu8; 32];
+        assert!(vault.payload.conversations.is_empty());
+        let conv = vault.get_or_create_conversation(cid);
+        assert_eq!(conv.contact_id, cid);
+        assert_eq!(conv.unread_count, 0);
+        assert_eq!(vault.payload.conversations.len(), 1);
+    }
+
+    #[test]
+    fn get_or_create_conversation_reuses_existing() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("vault.op4");
+        let mut vault = create_test_vault(&path, b"pass", b"duress");
+
+        let cid = [0xDDu8; 32];
+        vault.get_or_create_conversation(cid);
+        vault.get_or_create_conversation(cid);
+        assert_eq!(vault.payload.conversations.len(), 1);
     }
 }

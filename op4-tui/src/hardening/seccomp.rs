@@ -220,3 +220,16 @@ fn build_filter() -> Result<BpfProgram, String> {
     let bpf: BpfProgram = filter.try_into().map_err(|e| format!("{e}"))?;
     Ok(bpf)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_filter_succeeds() {
+        // Verify the seccomp BPF filter compiles without error.
+        // Does NOT install the filter -- that would break the test runner.
+        let result = build_filter();
+        assert!(result.is_ok(), "seccomp filter must compile: {:?}", result.err());
+    }
+}

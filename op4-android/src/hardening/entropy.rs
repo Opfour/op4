@@ -20,3 +20,14 @@ pub fn verify_entropy_source() -> Result<(), HardeningError> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entropy_source_works_on_desktop() {
+        // getrandom(2) is available on Linux -- should succeed
+        assert!(verify_entropy_source().is_ok());
+    }
+}

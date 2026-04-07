@@ -1,0 +1,16 @@
+---
+source: op4-tui/tests/ui_snapshots.rs
+expression: output
+---
+┌Contacts────────────────────────────────────────┐
+│  Alice ✓                                       │
+│> Bob ⚠ UNVERIFIED (3)                          │
+│  Charlie ⚠ UNVERIFIED                          │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+│                                                │
+└────────────────────────────────────────────────┘

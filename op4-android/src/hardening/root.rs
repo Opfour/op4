@@ -58,3 +58,26 @@ pub fn check_root_status() -> RootStatus {
 
     RootStatus::NotRooted
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn desktop_linux_is_not_rooted() {
+        // On a normal desktop Linux system, none of the Android root
+        // indicators should exist.
+        let status = check_root_status();
+        assert_eq!(status, RootStatus::NotRooted);
+    }
+
+    #[test]
+    fn root_status_variants_are_distinct() {
+        let a = RootStatus::NotRooted;
+        let b = RootStatus::PossiblyRooted("test".into());
+        let c = RootStatus::Rooted("su".into());
+        assert_ne!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(b, c);
+    }
+}

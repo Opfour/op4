@@ -201,6 +201,10 @@ pub struct PublicKeyBundle {
     /// Each OPK is used at most once and the secret is deleted after use.
     #[serde(default)]
     pub opk_pubs: Vec<[u8; 32]>,
+    /// 4-byte IDs for each OPK (SHA-256 of the public key, truncated).
+    /// Used for stable lookup during handshake (not positional index).
+    #[serde(default)]
+    pub opk_ids: Vec<[u8; 4]>,
 }
 
 impl PublicKeyBundle {
@@ -211,16 +215,17 @@ impl PublicKeyBundle {
         ratchet_pub: [u8; 32],
         nym_address: String,
     ) -> Self {
-        Self::from_keypairs_with_opks(kem, signing, ratchet_pub, nym_address, Vec::new())
+        Self::from_keypairs_with_opks(kem, signing, ratchet_pub, nym_address, Vec::new(), Vec::new())
     }
 
-    /// Build a bundle with one-time prekey public keys included.
+    /// Build a bundle with one-time prekey public keys and their IDs included.
     pub fn from_keypairs_with_opks(
         kem: &HybridKemKeypair,
         signing: &HybridSigningKeypair,
         ratchet_pub: [u8; 32],
         nym_address: String,
         opk_pubs: Vec<[u8; 32]>,
+        opk_ids: Vec<[u8; 4]>,
     ) -> Self {
         let mldsa_vk_bytes: Vec<u8> = signing.mldsa_keypair.verifying_key().encode().to_vec();
         Self {
@@ -232,6 +237,7 @@ impl PublicKeyBundle {
             mldsa_vk: mldsa_vk_bytes,
             ratchet_pub,
             opk_pubs,
+            opk_ids,
         }
     }
 
