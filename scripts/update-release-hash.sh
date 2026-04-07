@@ -28,7 +28,7 @@ fi
 
 # ── Extract version and hash ──────────────────────────────────────────────────
 
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+VERSION=$(grep '^version' op4-tui/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
 HASH=$(./target/release/op4 --print-hash)
 
 echo "Version : $VERSION"
