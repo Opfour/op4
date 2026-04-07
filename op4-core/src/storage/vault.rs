@@ -146,14 +146,18 @@ impl VaultPayload {
 
     /// Compute OPK IDs for all current secrets (for inclusion in PublicKeyBundle).
     pub fn opk_ids(&self) -> Vec<[u8; 4]> {
-        self.opk_secrets.iter().map(Self::opk_id_for_secret).collect()
+        self.opk_secrets
+            .iter()
+            .map(Self::opk_id_for_secret)
+            .collect()
     }
 
     /// Remove a consumed OPK by its 4-byte ID. Returns the secret if found.
     pub fn consume_opk_by_id(&mut self, id: &[u8; 4]) -> Option<[u8; 32]> {
-        let pos = self.opk_secrets.iter().position(|s| {
-            &Self::opk_id_for_secret(s) == id
-        });
+        let pos = self
+            .opk_secrets
+            .iter()
+            .position(|s| &Self::opk_id_for_secret(s) == id);
         pos.map(|idx| self.opk_secrets.remove(idx))
     }
 
@@ -189,7 +193,12 @@ impl VaultUnlocked {
         normal_passphrase: &[u8],
         duress_passphrase: &[u8],
     ) -> Result<Self, VaultError> {
-        Self::create_with_params(path, normal_passphrase, duress_passphrase, &Argon2Params::default())
+        Self::create_with_params(
+            path,
+            normal_passphrase,
+            duress_passphrase,
+            &Argon2Params::default(),
+        )
     }
 
     /// Create a new vault with explicit Argon2 parameters.
@@ -599,11 +608,7 @@ mod tests {
         }
     }
 
-    fn create_test_vault(
-        path: &std::path::Path,
-        normal: &[u8],
-        duress: &[u8],
-    ) -> VaultUnlocked {
+    fn create_test_vault(path: &std::path::Path, normal: &[u8], duress: &[u8]) -> VaultUnlocked {
         VaultUnlocked::create_with_params(path, normal, duress, &test_params()).unwrap()
     }
 
@@ -820,7 +825,10 @@ mod tests {
         }
         assert_eq!(payload.opk_secrets.len(), OPK_REPLENISH_THRESHOLD);
         assert!(payload.replenish_opks_if_needed());
-        assert_eq!(payload.opk_secrets.len(), OPK_REPLENISH_THRESHOLD + OPK_BATCH_SIZE);
+        assert_eq!(
+            payload.opk_secrets.len(),
+            OPK_REPLENISH_THRESHOLD + OPK_BATCH_SIZE
+        );
     }
 
     #[test]
@@ -851,8 +859,16 @@ mod tests {
 
         let contact_id = [0xAAu8; 32];
         let msgs = vec![
-            StoredMessage { counter: 1, content: "hello".into(), from_us: true },
-            StoredMessage { counter: 2, content: "world".into(), from_us: false },
+            StoredMessage {
+                counter: 1,
+                content: "hello".into(),
+                from_us: true,
+            },
+            StoredMessage {
+                counter: 2,
+                content: "world".into(),
+                from_us: false,
+            },
         ];
         vault.save_messages(&contact_id, &msgs).unwrap();
 

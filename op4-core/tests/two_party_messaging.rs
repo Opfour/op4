@@ -13,9 +13,7 @@ use op4_core::crypto::primitives::{Argon2Params, MacKey, SymKey};
 use op4_core::crypto::ratchet::RatchetState;
 use op4_core::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use op4_core::network::message::{WireMessage, WireMessageType};
-use op4_core::storage::vault::{
-    AppSettings, PendingOutbound, StoredMessage, VaultUnlocked,
-};
+use op4_core::storage::vault::{AppSettings, PendingOutbound, StoredMessage, VaultUnlocked};
 
 use rand::rngs::OsRng;
 use tempfile::tempdir;
@@ -111,11 +109,7 @@ fn full_two_party_conversation_with_vault_persistence() {
     .unwrap();
 
     // Bob completes handshake (with OPK)
-    let opk_secrets: Vec<[u8; 32]> = bob
-        .vault
-        .payload
-        .opk_secrets
-        .clone();
+    let opk_secrets: Vec<[u8; 32]> = bob.vault.payload.opk_secrets.clone();
     let (initial_pt, bob_sk, consumed_opk) =
         perform_handshake_bob(&bob.kem, &bob.ratchet_secret, &opk_secrets, &hs_msg).unwrap();
 
@@ -161,7 +155,13 @@ fn full_two_party_conversation_with_vault_persistence() {
         // Build and verify HMAC
         let mac_key = MacKey(mac_key_bytes);
         let mac = compute_message_mac(&mac_key, &conversation_id, header.n, &ct);
-        assert!(verify_message_mac(&mac_key, &conversation_id, header.n, &ct, &mac));
+        assert!(verify_message_mac(
+            &mac_key,
+            &conversation_id,
+            header.n,
+            &ct,
+            &mac
+        ));
 
         // Bob decrypts
         let (pt, bob_mac_bytes) = bob_ratchet.ratchet_decrypt(&header, &ct).unwrap();
@@ -169,7 +169,13 @@ fn full_two_party_conversation_with_vault_persistence() {
 
         // Bob verifies HMAC
         let bob_mac_key = MacKey(bob_mac_bytes);
-        assert!(verify_message_mac(&bob_mac_key, &conversation_id, header.n, &ct, &mac));
+        assert!(verify_message_mac(
+            &bob_mac_key,
+            &conversation_id,
+            header.n,
+            &ct,
+            &mac
+        ));
 
         alice_messages.push(StoredMessage {
             counter: i,
@@ -230,8 +236,7 @@ fn full_two_party_conversation_with_vault_persistence() {
 
     // -- 7. Reopen vaults from disk --
     let alice_vault2 =
-        VaultUnlocked::unlock_with_params(&alice_path, b"test-passphrase", &test_params())
-            .unwrap();
+        VaultUnlocked::unlock_with_params(&alice_path, b"test-passphrase", &test_params()).unwrap();
     let bob_vault2 =
         VaultUnlocked::unlock_with_params(&bob_path, b"test-passphrase", &test_params()).unwrap();
 
@@ -270,7 +275,9 @@ fn full_two_party_conversation_with_vault_persistence() {
         RatchetState::from_encrypted_bytes(&ratchet_key, &bob_conv2.ratchet_state_ct).unwrap();
 
     // Continue messaging after vault reload
-    let (header, ct, _) = alice_ratchet2.ratchet_encrypt(b"still here after reload").unwrap();
+    let (header, ct, _) = alice_ratchet2
+        .ratchet_encrypt(b"still here after reload")
+        .unwrap();
     let (pt, _) = bob_ratchet2.ratchet_decrypt(&header, &ct).unwrap();
     assert_eq!(pt, b"still here after reload");
 
@@ -292,13 +299,8 @@ fn outbox_queue_persists_and_retries() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("outbox.op4");
 
-    let mut vault = VaultUnlocked::create_with_params(
-        &path,
-        b"pass",
-        b"duress",
-        &test_params(),
-    )
-    .unwrap();
+    let mut vault =
+        VaultUnlocked::create_with_params(&path, b"pass", b"duress", &test_params()).unwrap();
 
     // Simulate encrypting 3 messages for an offline contact
     let contact_id = [0xCCu8; 32];
@@ -319,8 +321,7 @@ fn outbox_queue_persists_and_retries() {
 
     // Save and reload
     vault.save().unwrap();
-    let vault2 =
-        VaultUnlocked::unlock_with_params(&path, b"pass", &test_params()).unwrap();
+    let vault2 = VaultUnlocked::unlock_with_params(&path, b"pass", &test_params()).unwrap();
 
     assert_eq!(vault2.payload.outbox.len(), 3);
     assert_eq!(vault2.payload.outbox[0].contact_id, contact_id);
@@ -329,14 +330,12 @@ fn outbox_queue_persists_and_retries() {
     assert_eq!(vault2.payload.outbox[2].wire_payload[0], 2);
 
     // Simulate successful delivery of first message -- remove from outbox
-    let mut vault3 =
-        VaultUnlocked::unlock_with_params(&path, b"pass", &test_params()).unwrap();
+    let mut vault3 = VaultUnlocked::unlock_with_params(&path, b"pass", &test_params()).unwrap();
     vault3.payload.outbox.remove(0);
     assert_eq!(vault3.payload.outbox.len(), 2);
     vault3.save().unwrap();
 
-    let vault4 =
-        VaultUnlocked::unlock_with_params(&path, b"pass", &test_params()).unwrap();
+    let vault4 = VaultUnlocked::unlock_with_params(&path, b"pass", &test_params()).unwrap();
     assert_eq!(vault4.payload.outbox.len(), 2);
 }
 
@@ -462,13 +461,9 @@ fn duress_vault_is_isolated_from_real_data() {
     let path = dir.path().join("duress_test.op4");
 
     // Create vault with real data
-    let mut vault = VaultUnlocked::create_with_params(
-        &path,
-        b"real-pass",
-        b"duress-pass",
-        &test_params(),
-    )
-    .unwrap();
+    let mut vault =
+        VaultUnlocked::create_with_params(&path, b"real-pass", b"duress-pass", &test_params())
+            .unwrap();
 
     vault.payload.nym_address = "real_user.onion:14101".into();
     vault.payload.generate_opks();
@@ -488,7 +483,10 @@ fn duress_vault_is_isolated_from_real_data() {
 
     assert!(duress.is_duress);
     assert_eq!(duress.payload.nym_address, "[duress]");
-    assert!(duress.payload.contacts.is_empty(), "duress must have no contacts");
+    assert!(
+        duress.payload.contacts.is_empty(),
+        "duress must have no contacts"
+    );
     assert!(duress.payload.conversations.is_empty());
     assert!(duress.payload.outbox.is_empty());
     assert!(
@@ -512,13 +510,8 @@ fn app_settings_persist() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("settings.op4");
 
-    let mut vault = VaultUnlocked::create_with_params(
-        &path,
-        b"pass",
-        b"duress",
-        &test_params(),
-    )
-    .unwrap();
+    let mut vault =
+        VaultUnlocked::create_with_params(&path, b"pass", b"duress", &test_params()).unwrap();
 
     vault.payload.settings = AppSettings {
         tor_socks_addr: "127.0.0.1:9150".into(),

@@ -47,9 +47,7 @@ fn android_main(app: android_activity::AndroidApp) {
     eframe::run_native(
         "op4",
         options,
-        Box::new(move |_cc| {
-            Ok(Box::new(ui::Op4App::new(vault_path, data_dir, cache_dir)))
-        }),
+        Box::new(move |_cc| Ok(Box::new(ui::Op4App::new(vault_path, data_dir, cache_dir)))),
     )
     .expect("eframe failed to start");
 }

@@ -320,10 +320,7 @@ mod tests {
         g.record_change().unwrap();
         assert!(!g.can_change_key());
         let result = g.record_change();
-        assert!(matches!(
-            result,
-            Err(IdentityError::KeyChangeTooFrequent)
-        ));
+        assert!(matches!(result, Err(IdentityError::KeyChangeTooFrequent)));
     }
 
     #[test]
