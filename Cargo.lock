@@ -1123,6 +1123,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "cmov"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f88a43d011fc4a6876cb7344703e297c71dda42494fee094d5f7c76bf13f746"
+
+[[package]]
 name = "coarsetime"
 version = "0.1.37"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1498,6 +1504,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0369ee1ad671834580515889b80f2ea915f23b8be8d0daa4bbaf2ac5c7590835"
 dependencies = [
  "cipher",
+]
+
+[[package]]
+name = "ctutils"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+dependencies = [
+ "cmov",
 ]
 
 [[package]]
@@ -3799,11 +3814,12 @@ dependencies = [
 
 [[package]]
 name = "ml-dsa"
-version = "0.1.0-rc.7"
+version = "0.1.0-rc.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af6e554a2affc86740759dbe568a92abd58b47fea4e28ebe1b7bb4da99e490d4"
+checksum = "f5b2bb0ad6fa2b40396775bd56f51345171490fef993f46f91a876ecdbdaea55"
 dependencies = [
  "const-oid 0.10.2",
+ "ctutils",
  "hybrid-array 0.4.8",
  "module-lattice",
  "pkcs8 0.11.0-rc.11",
@@ -3828,9 +3844,9 @@ dependencies = [
 
 [[package]]
 name = "module-lattice"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6dfecc750073acc09af2f8899b2342d520d570392ba1c3aed53eeb0d84ca4103"
+checksum = "164eb3faeaecbd14b0b2a917c1b4d0c035097a9c559b0bed85c2cdd032bc8faa"
 dependencies = [
  "hybrid-array 0.4.8",
  "num-traits",
