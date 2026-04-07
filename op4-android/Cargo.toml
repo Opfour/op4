@@ -15,7 +15,7 @@ libc = "0.2"
 getrandom = "0.2"
 log = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
-arti-client = { version = "0.40", default-features = false, features = [
+arti-client = { version = "0.41", default-features = false, features = [
     "tokio",
     "rustls",
     "onion-service-client",
