@@ -37,6 +37,20 @@ pub struct OpkRefreshPayload {
     pub opk_ids: Vec<[u8; 4]>,
 }
 
+/// Signed wrapper for `OpkRefreshPayload`.  The sender includes their
+/// Ed25519 verifying key so the receiver can look up the contact, and a
+/// hybrid Ed25519 + ML-DSA signature over the serialised payload so the
+/// receiver can authenticate it before applying.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignedOpkRefresh {
+    /// Sender's Ed25519 verifying key (used to identify the contact).
+    pub sender_ed25519_vk: [u8; 32],
+    /// The raw OPK refresh payload.
+    pub payload: OpkRefreshPayload,
+    /// Hybrid signature over the postcard-serialised `OpkRefreshPayload`.
+    pub signature: crate::crypto::keys::HybridSignature,
+}
+
 /// The outer wire message sent via Nym.
 /// Sender identity is NOT in the routing layer.
 /// Only recipient Nym address is known to the Nym network.
@@ -217,5 +231,67 @@ mod tests {
         assert_eq!(decoded.opk_ids.len(), 2);
         assert_eq!(decoded.opk_pubs[0], [0xAA; 32]);
         assert_eq!(decoded.opk_ids[1], [0x05, 0x06, 0x07, 0x08]);
+    }
+
+    #[test]
+    fn signed_opk_refresh_verify_roundtrip() {
+        use crate::crypto::keys::{
+            hybrid_sign, hybrid_verify, HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle,
+        };
+        let signing = HybridSigningKeypair::generate();
+        let kem = HybridKemKeypair::generate();
+        let bundle =
+            PublicKeyBundle::from_keypairs(&kem, &signing, [0u8; 32], "test_addr".into());
+
+        let payload = OpkRefreshPayload {
+            opk_pubs: vec![[0xAA; 32]],
+            opk_ids: vec![[1, 2, 3, 4]],
+        };
+        let payload_bytes = postcard::to_allocvec(&payload).unwrap();
+        let signature = hybrid_sign(&signing, &payload_bytes);
+
+        let signed = SignedOpkRefresh {
+            sender_ed25519_vk: bundle.ed25519_vk,
+            payload,
+            signature,
+        };
+
+        // Roundtrip serialisation
+        let wire_bytes = postcard::to_allocvec(&signed).unwrap();
+        let decoded: SignedOpkRefresh = postcard::from_bytes(&wire_bytes).unwrap();
+        assert_eq!(decoded.sender_ed25519_vk, bundle.ed25519_vk);
+        assert_eq!(decoded.payload.opk_pubs.len(), 1);
+
+        // Signature verifies against the correct bundle
+        let check_bytes = postcard::to_allocvec(&decoded.payload).unwrap();
+        assert!(hybrid_verify(&bundle, &check_bytes, &decoded.signature).is_ok());
+    }
+
+    #[test]
+    fn signed_opk_refresh_wrong_key_rejected() {
+        use crate::crypto::keys::{
+            hybrid_sign, hybrid_verify, HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle,
+        };
+        let signing = HybridSigningKeypair::generate();
+        let payload = OpkRefreshPayload {
+            opk_pubs: vec![[0xBB; 32]],
+            opk_ids: vec![[5, 6, 7, 8]],
+        };
+        let payload_bytes = postcard::to_allocvec(&payload).unwrap();
+        let signature = hybrid_sign(&signing, &payload_bytes);
+
+        let signed = SignedOpkRefresh {
+            sender_ed25519_vk: signing.ed25519_sk.verifying_key().to_bytes(),
+            payload,
+            signature,
+        };
+
+        // A different keypair's bundle must reject the signature
+        let other_signing = HybridSigningKeypair::generate();
+        let other_kem = HybridKemKeypair::generate();
+        let other_bundle =
+            PublicKeyBundle::from_keypairs(&other_kem, &other_signing, [0u8; 32], "x".into());
+        let check_bytes = postcard::to_allocvec(&signed.payload).unwrap();
+        assert!(hybrid_verify(&other_bundle, &check_bytes, &signed.signature).is_err());
     }
 }
