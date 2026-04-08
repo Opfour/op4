@@ -5,6 +5,9 @@ edition = "2021"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
 publish = false
+description = "Android target for op4 secure messenger"
+repository = "https://github.com/Opfour/op4"
+authors = ["David Singer"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -15,20 +18,20 @@ libc = "0.2"
 getrandom = "0.2"
 log = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "time", "sync", "macros"] }
-arti-client = { version = "0.40", default-features = false, features = [
+arti-client = { version = "0.41", default-features = false, features = [
     "tokio",
     "rustls",
     "onion-service-client",
     "onion-service-service",
 ] }
-tor-rtcompat = { version = "0.40", features = ["tokio", "rustls"] }
-tor-hsservice = "0.40"
-tor-cell = "0.40"
+tor-rtcompat = { version = "0.41", features = ["tokio", "rustls"] }
+tor-hsservice = "0.41"
+tor-cell = "0.41"
 safelog = "0.8"
 futures = "0.3"
 rand = "0.8"
-hkdf = "0.12"
-sha2 = "0.10"
+hkdf = "0.13"
+sha2 = "0.11"
 
 eframe = { version = "0.33", features = ["wgpu"] }
 qrcode = "0.14"
