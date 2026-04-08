@@ -21,7 +21,7 @@ use op4_core::crypto::primitives::MacKey;
 use op4_core::crypto::ratchet::{MessageHeader, RatchetState};
 use op4_core::identity::profile::{BootstrapCode, ContactCode};
 use op4_core::identity::revocation::{RevocationCertificate, RevocationReason};
-use op4_core::network::message::{OpkRefreshPayload, WireMessage, WireMessageType};
+use op4_core::network::message::{SignedOpkRefresh, WireMessage, WireMessageType};
 use op4_core::network::Transport;
 use op4_core::storage::vault::{StoredMessage, VaultUnlocked};
 
@@ -757,18 +757,37 @@ fn handle_inbound_revocation(app: &mut Op4App, cert_bytes: &[u8]) {
 }
 
 fn handle_inbound_opk_refresh(app: &mut Op4App, payload_bytes: &[u8]) {
-    let payload: OpkRefreshPayload = match postcard::from_bytes(payload_bytes) {
-        Ok(p) => p,
+    let signed: SignedOpkRefresh = match postcard::from_bytes(payload_bytes) {
+        Ok(s) => s,
         Err(_) => return,
     };
     let vault = match app.vault.as_mut() {
         Some(v) => v,
         None => return,
     };
-    // Update all contacts' OPK pools. See TUI handler for rationale.
-    // TODO(v0.4): authenticate OpkRefresh via a signed wrapper or MAC.
-    for contact in &mut vault.payload.contacts {
-        contact.apply_opk_refresh(payload.opk_pubs.clone(), payload.opk_ids.clone());
+
+    // Identify sender by Ed25519 verifying key.
+    let contact = match vault
+        .payload
+        .contacts
+        .iter_mut()
+        .find(|c| c.bundle.ed25519_vk == signed.sender_ed25519_vk)
+    {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Verify hybrid signature against known bundle.
+    let payload_bytes = match postcard::to_allocvec(&signed.payload) {
+        Ok(b) => b,
+        Err(_) => return,
+    };
+    if op4_core::crypto::keys::hybrid_verify(&contact.bundle, &payload_bytes, &signed.signature)
+        .is_err()
+    {
+        return;
     }
+
+    contact.apply_opk_refresh(signed.payload.opk_pubs, signed.payload.opk_ids);
     vault.save().ok();
 }
