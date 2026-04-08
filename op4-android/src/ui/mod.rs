@@ -21,7 +21,7 @@ use op4_core::crypto::primitives::MacKey;
 use op4_core::crypto::ratchet::{MessageHeader, RatchetState};
 use op4_core::identity::profile::{BootstrapCode, ContactCode};
 use op4_core::identity::revocation::{RevocationCertificate, RevocationReason};
-use op4_core::network::message::{WireMessage, WireMessageType};
+use op4_core::network::message::{OpkRefreshPayload, WireMessage, WireMessageType};
 use op4_core::network::Transport;
 use op4_core::storage::vault::{StoredMessage, VaultUnlocked};
 
@@ -590,6 +590,9 @@ fn handle_incoming_message(app: &mut Op4App, payload: &[u8]) {
         WireMessageType::Revocation => {
             handle_inbound_revocation(app, &wire.ciphertext);
         }
+        WireMessageType::OpkRefresh => {
+            handle_inbound_opk_refresh(app, &wire.ciphertext);
+        }
         _ => {}
     }
 }
@@ -751,4 +754,21 @@ fn handle_inbound_revocation(app: &mut Op4App, cert_bytes: &[u8]) {
             return;
         }
     }
+}
+
+fn handle_inbound_opk_refresh(app: &mut Op4App, payload_bytes: &[u8]) {
+    let payload: OpkRefreshPayload = match postcard::from_bytes(payload_bytes) {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let vault = match app.vault.as_mut() {
+        Some(v) => v,
+        None => return,
+    };
+    // Update all contacts' OPK pools. See TUI handler for rationale.
+    // TODO(v0.4): authenticate OpkRefresh via a signed wrapper or MAC.
+    for contact in &mut vault.payload.contacts {
+        contact.apply_opk_refresh(payload.opk_pubs.clone(), payload.opk_ids.clone());
+    }
+    vault.save().ok();
 }

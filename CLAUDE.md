@@ -1,34 +1,42 @@
-# CLAUDE.md - Coding Profile
-# Best for: dev projects, code review, debugging, refactoring
-# Extends: Universal CLAUDE.md rules
+# op4 -- Secure Terminal Messenger
 
----
+Rust workspace: terminal-based E2E encrypted messaging over Tor with post-quantum cryptography.
 
-## Output
-- Return code first. Explanation after, only if non-obvious.
-- No inline prose. Use comments sparingly - only where logic is unclear.
-- No boilerplate unless explicitly requested.
+## Workspace Crates
 
-## Code Rules
-- Simplest working solution. No over-engineering.
-- No abstractions for single-use operations.
-- No speculative features or "you might also want..."
-- Read the file before modifying it. Never edit blind.
-- No docstrings or type annotations on code not being changed.
-- No error handling for scenarios that cannot happen.
-- Three similar lines is better than a premature abstraction.
+- **op4-core** -- Crypto (Double Ratchet + X25519 + ML-KEM-768), storage, identity, networking
+- **op4-tui** -- Terminal UI
+- **op4-android** -- Android target (planned)
 
-## Review Rules
-- State the bug. Show the fix. Stop.
-- No suggestions beyond the scope of the review.
-- No compliments on the code before or after the review.
+## Key Directories
 
-## Debugging Rules
-- Never speculate about a bug without reading the relevant code first.
-- State what you found, where, and the fix. One pass.
-- If cause is unclear: say so. Do not guess.
+- `src/` -- Main binary entry (main.rs)
+- `op4-core/` -- Core library: crypto/, identity/, network/, storage/, hardening/
+- `op4-tui/` -- TUI frontend
+- `scripts/` -- Build and install scripts
+- `install/` -- Installation artifacts
+- `docs/` -- Documentation and logo
 
-## ASCII Only
-- No em dashes, smart quotes, Unicode bullets.
-- Plain hyphens and straight quotes only.
-- Code output must be copy-paste safe.
+## Commands
+
+```bash
+cargo test --workspace          # Run all tests
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all --check
+cargo build --release
+```
+
+## Architecture
+
+- Double Ratchet protocol (Signal-style) for message encryption
+- Post-quantum: X25519 + ML-KEM-768 hybrid key exchange
+- All traffic routed through Tor hidden services (.onion)
+- Local encrypted vault storage, no server
+- AppArmor profile in apparmor/
+
+## Rules
+
+- Crypto and security code requires 90%+ test coverage
+- Never weaken cryptographic defaults
+- Test on real Tor connections before releasing
+- v0.3.0 shipped; see docs for deferred items (OPKs, build hash, cover traffic)
