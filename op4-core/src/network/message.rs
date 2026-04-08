@@ -26,6 +26,15 @@ pub enum WireMessageType {
     Dummy,          // cover traffic filler
     BundleRequest,  // bootstrap: request our full PublicKeyBundle
     BundleResponse, // bootstrap: response carrying full PublicKeyBundle
+    OpkRefresh,     // push fresh OPK public keys to contacts after replenishment
+}
+
+/// Payload for `OpkRefresh` messages: carries fresh one-time prekey public keys
+/// and their IDs so contacts can use them in future handshakes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpkRefreshPayload {
+    pub opk_pubs: Vec<[u8; 32]>,
+    pub opk_ids: Vec<[u8; 4]>,
 }
 
 /// The outer wire message sent via Nym.
@@ -194,5 +203,19 @@ mod tests {
     fn max_wire_bytes_constant_value() {
         assert_eq!(MAX_WIRE_BYTES, MAX_PAYLOAD + 512);
         assert_eq!(MAX_PAYLOAD, BLOCK_SIZE * MAX_BLOCKS);
+    }
+
+    #[test]
+    fn opk_refresh_payload_roundtrip() {
+        let payload = OpkRefreshPayload {
+            opk_pubs: vec![[0xAA; 32], [0xBB; 32]],
+            opk_ids: vec![[0x01, 0x02, 0x03, 0x04], [0x05, 0x06, 0x07, 0x08]],
+        };
+        let bytes = postcard::to_allocvec(&payload).unwrap();
+        let decoded: OpkRefreshPayload = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.opk_pubs.len(), 2);
+        assert_eq!(decoded.opk_ids.len(), 2);
+        assert_eq!(decoded.opk_pubs[0], [0xAA; 32]);
+        assert_eq!(decoded.opk_ids[1], [0x05, 0x06, 0x07, 0x08]);
     }
 }

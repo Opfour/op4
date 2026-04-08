@@ -130,6 +130,15 @@ impl StoredContact {
             added_seq: seq,
         }
     }
+
+    /// Replace this contact's OPK pool with fresh keys from an OpkRefresh message.
+    /// Returns the number of new OPKs accepted.
+    pub fn apply_opk_refresh(&mut self, opk_pubs: Vec<[u8; 32]>, opk_ids: Vec<[u8; 4]>) -> usize {
+        let count = opk_pubs.len().min(opk_ids.len());
+        self.bundle.opk_pubs = opk_pubs[..count].to_vec();
+        self.bundle.opk_ids = opk_ids[..count].to_vec();
+        count
+    }
 }
 
 /// Rate-limit tracker for key changes.
@@ -278,6 +287,30 @@ mod tests {
         let expected: [u8; 32] = Sha256::digest(&bytes).into();
         let c = StoredContact::new(bundle, "Bob".into(), 0);
         assert_eq!(c.id, expected);
+    }
+
+    #[test]
+    fn apply_opk_refresh_replaces_pool() {
+        let mut c = StoredContact::new(make_bundle(), "Eve".into(), 0);
+        assert!(c.bundle.opk_pubs.is_empty());
+
+        let pubs = vec![[0xAA; 32], [0xBB; 32], [0xCC; 32]];
+        let ids = vec![[1, 0, 0, 0], [2, 0, 0, 0], [3, 0, 0, 0]];
+        let n = c.apply_opk_refresh(pubs.clone(), ids.clone());
+        assert_eq!(n, 3);
+        assert_eq!(c.bundle.opk_pubs, pubs);
+        assert_eq!(c.bundle.opk_ids, ids);
+    }
+
+    #[test]
+    fn apply_opk_refresh_mismatched_lengths_takes_min() {
+        let mut c = StoredContact::new(make_bundle(), "Eve".into(), 0);
+        let pubs = vec![[0xAA; 32], [0xBB; 32]];
+        let ids = vec![[1, 0, 0, 0]]; // only 1 id
+        let n = c.apply_opk_refresh(pubs, ids);
+        assert_eq!(n, 1);
+        assert_eq!(c.bundle.opk_pubs.len(), 1);
+        assert_eq!(c.bundle.opk_ids.len(), 1);
     }
 
     #[test]
