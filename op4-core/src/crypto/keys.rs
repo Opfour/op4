@@ -97,13 +97,13 @@ impl HybridKemKeypair {
 /// Combined Ed25519 + ML-DSA-65 signing keypair.
 /// Both signatures are produced and required for verification.
 ///
-/// ML-DSA key material is held in a `KeyPair<MlDsa65>` which gives access to
-/// both the signing key and verifying key.  We use `from_seed` (not `key_gen`)
+/// ML-DSA key material is held in a `SigningKey<MlDsa65>` which gives access to
+/// both the expanded signing key and verifying key.  We use `from_seed` (not `key_gen`)
 /// to generate keys so we can supply entropy from `getrandom` directly and
 /// avoid the rand_core 0.6 vs 0.10 version mismatch that would otherwise occur
 /// when passing `OsRng` to ml-dsa's `CryptoRng`-bounded `key_gen`.
 ///
-/// Zeroization notes (ml-dsa 0.1.0-rc.7 does not impl `Zeroize` for `KeyPair`):
+/// Zeroization notes (ml-dsa 0.1.0-rc.8 does not impl `Zeroize` for `SigningKey`):
 /// - `ed25519_sk` — zeroed on drop by ed25519-dalek's own ZeroizeOnDrop.
 /// - `mldsa_seed` — zeroed on drop (32-byte seed, the true secret).  The
 ///   full derived keypair on heap is NOT zeroed; but with the seed wiped
@@ -114,10 +114,10 @@ pub struct HybridSigningKeypair {
     pub ed25519_sk: SigningKey,
     #[zeroize(skip)]
     pub ed25519_vk: VerifyingKey,
-    /// ML-DSA keypair — NOT zeroed on drop (ml-dsa 0.1.0-rc.7 limitation).
+    /// ML-DSA signing key — NOT zeroed on drop (ml-dsa 0.1.0-rc.8 limitation).
     /// The 32-byte `mldsa_seed` below IS zeroed and is sufficient for re-deriving.
     #[zeroize(skip)]
-    pub mldsa_keypair: Box<ml_dsa::KeyPair<ml_dsa::MlDsa65>>,
+    pub mldsa_keypair: Box<ml_dsa::SigningKey<ml_dsa::MlDsa65>>,
     /// ML-DSA 32-byte seed — zeroed on drop.  Used for serialization and
     /// to reconstruct the keypair from the vault without storing the full 4 KB key.
     mldsa_seed: [u8; 32],
@@ -234,7 +234,10 @@ impl PublicKeyBundle {
         opk_pubs: Vec<[u8; 32]>,
         opk_ids: Vec<[u8; 4]>,
     ) -> Self {
-        let mldsa_vk_bytes: Vec<u8> = signing.mldsa_keypair.verifying_key().encode().to_vec();
+        let mldsa_vk_bytes: Vec<u8> = {
+            use ml_dsa::signature::Keypair;
+            signing.mldsa_keypair.verifying_key().encode().to_vec()
+        };
         Self {
             version: 1,
             nym_address,
@@ -285,7 +288,7 @@ pub fn hybrid_sign(keypair: &HybridSigningKeypair, message: &[u8]) -> HybridSign
     let ed_sig: Signature = keypair.ed25519_sk.sign(message);
 
     // ML-DSA signing is deterministic — no RNG needed.
-    let dsa_sig = keypair.mldsa_keypair.signing_key().sign(message);
+    let dsa_sig = keypair.mldsa_keypair.sign(message);
 
     HybridSignature {
         ed25519: ed_sig.to_bytes().to_vec(),
@@ -418,7 +421,6 @@ pub fn hybrid_kem_decapsulate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
 
     // ── HybridKemKeypair ─────────────────────────────────────────────────────
 

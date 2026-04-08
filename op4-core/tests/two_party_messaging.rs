@@ -6,6 +6,8 @@
 //!
 //! No network, no Tor, no TUI -- pure in-process E2E test.
 
+use rand::rngs::OsRng;
+
 use op4_core::crypto::handshake::{perform_handshake_alice, perform_handshake_bob};
 use op4_core::crypto::hmac_auth::{compute_message_mac, verify_message_mac};
 use op4_core::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
@@ -15,7 +17,6 @@ use op4_core::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use op4_core::network::message::{WireMessage, WireMessageType};
 use op4_core::storage::vault::{AppSettings, PendingOutbound, StoredMessage, VaultUnlocked};
 
-use rand::rngs::OsRng;
 use tempfile::tempdir;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 

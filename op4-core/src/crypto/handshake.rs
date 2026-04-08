@@ -249,7 +249,6 @@ fn combine_dh_outputs(
 mod tests {
     use super::*;
     use crate::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
-    use rand::rngs::OsRng;
 
     /// Build a fresh Bob identity: KEM keypair, signing keypair, ratchet secret,
     /// and a `PublicKeyBundle` with the ratchet public key embedded.

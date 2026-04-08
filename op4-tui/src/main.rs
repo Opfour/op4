@@ -7,6 +7,8 @@ use crossterm::{
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
 
+use rand::rngs::OsRng;
+
 use op4_core::crypto::keys::{HybridKemKeypair, HybridSigningKeypair};
 use op4_core::error::{AppError, VaultError};
 use op4_core::storage::vault::VaultUnlocked;
@@ -14,7 +16,6 @@ use op4_tui::hardening::memory::apply_memory_hardening;
 use op4_tui::hardening::seccomp::install_seccomp_filter;
 use op4_tui::network::nym_client::NymClient;
 use op4_tui::ui::passphrase::{prompt_new_passphrase, prompt_unlock_passphrase};
-use rand::rngs::OsRng;
 use x25519_dalek::StaticSecret;
 use zeroize::Zeroizing;
 

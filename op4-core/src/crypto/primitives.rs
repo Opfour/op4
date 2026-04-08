@@ -118,23 +118,24 @@ pub fn argon2id_derive(
 
 /// Compute HMAC-SHA256. Returns 32-byte tag.
 pub fn hmac_sign(key: &MacKey, data: &[u8]) -> [u8; MAC_LEN] {
-    let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(&key.0).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&key.0)
+        .expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
 
 /// Constant-time HMAC verification.
 pub fn hmac_verify(key: &MacKey, data: &[u8], tag: &[u8; MAC_LEN]) -> bool {
-    let mut mac =
-        <Hmac<Sha256> as Mac>::new_from_slice(&key.0).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(&key.0)
+        .expect("HMAC accepts any key length");
     mac.update(data);
     mac.verify_slice(tag.as_ref()).is_ok()
 }
 
 /// Internal: HMAC-SHA256 from raw key bytes (used in ratchet KDF).
 pub fn hmac_sign_raw(key: &[u8; 32], data: &[u8]) -> [u8; MAC_LEN] {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(key)
+        .expect("HMAC accepts any key length");
     mac.update(data);
     mac.finalize().into_bytes().into()
 }
@@ -145,7 +146,8 @@ pub fn hmac_sign_raw(key: &[u8; 32], data: &[u8]) -> [u8; MAC_LEN] {
 /// constant-time comparison, preventing timing side-channels.
 /// Used in the handshake to check the session-key-bound MAC.
 pub fn hmac_verify_raw(key: &[u8; 32], data: &[u8], tag: &[u8; MAC_LEN]) -> bool {
-    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    let mut mac = <Hmac<Sha256> as hmac::digest::KeyInit>::new_from_slice(key)
+        .expect("HMAC accepts any key length");
     mac.update(data);
     mac.verify_slice(tag.as_ref()).is_ok()
 }
