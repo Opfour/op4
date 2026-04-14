@@ -33,7 +33,7 @@ rand = "0.8"
 hkdf = "0.13"
 sha2 = "0.11"
 
-eframe = { version = "0.33", features = ["wgpu"] }
+eframe = { version = "0.34", features = ["wgpu"] }
 qrcode = "0.14"
 image = { version = "0.25", default-features = false }
 zxcvbn = "3"
