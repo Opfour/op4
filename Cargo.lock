@@ -4304,13 +4304,13 @@ dependencies = [
 
 [[package]]
 name = "op4-android"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "android-activity",
  "arti-client",
  "eframe",
  "futures",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "hkdf 0.13.0",
  "image",
  "libc",
@@ -4334,13 +4334,13 @@ dependencies = [
 
 [[package]]
 name = "op4-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "argon2",
  "bs58",
  "chacha20poly1305",
  "ed25519-dalek",
- "getrandom 0.2.17",
+ "getrandom 0.4.2",
  "hkdf 0.13.0",
  "hmac 0.13.0",
  "hybrid-array 0.4.10",
@@ -4360,7 +4360,7 @@ dependencies = [
 
 [[package]]
 name = "op4-tui"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bs58",
  "crossterm",
