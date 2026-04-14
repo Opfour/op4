@@ -21,7 +21,7 @@ path = "src/main.rs"
 op4-core = { version = "0.3.1", path = "../op4-core" }
 
 # Tor transport
-tokio            = { version = "1.50.0", features = ["rt-multi-thread", "sync", "time", "io-util", "net", "fs", "macros"] }
+tokio            = { version = "1.51.1", features = ["rt-multi-thread", "sync", "time", "io-util", "net", "fs", "macros"] }
 hkdf             = "0.13"
 sha2             = "0.11"
 
