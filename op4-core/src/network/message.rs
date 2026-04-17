@@ -240,8 +240,7 @@ mod tests {
         };
         let signing = HybridSigningKeypair::generate();
         let kem = HybridKemKeypair::generate();
-        let bundle =
-            PublicKeyBundle::from_keypairs(&kem, &signing, [0u8; 32], "test_addr".into());
+        let bundle = PublicKeyBundle::from_keypairs(&kem, &signing, [0u8; 32], "test_addr".into());
 
         let payload = OpkRefreshPayload {
             opk_pubs: vec![[0xAA; 32]],

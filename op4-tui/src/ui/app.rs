@@ -25,13 +25,15 @@ use op4_core::crypto::handshake::{
     perform_handshake_alice, perform_handshake_bob, HandshakeInitMessage,
 };
 use op4_core::crypto::hmac_auth::{compute_message_mac, verify_message_mac, MessageMac};
+use op4_core::crypto::keys::hybrid_sign;
 use op4_core::crypto::keys::{HybridKemKeypair, HybridSigningKeypair, PublicKeyBundle};
 use op4_core::crypto::primitives::{aead_decrypt, aead_encrypt, hkdf_expand, MacKey, SymKey};
 use op4_core::crypto::ratchet::{MessageHeader, RatchetState};
 use op4_core::identity::profile::{BootstrapCode, ContactCode, StoredContact};
 use op4_core::identity::revocation::{RevocationCertificate, RevocationReason};
-use op4_core::crypto::keys::hybrid_sign;
-use op4_core::network::message::{OpkRefreshPayload, SignedOpkRefresh, WireMessage, WireMessageType};
+use op4_core::network::message::{
+    OpkRefreshPayload, SignedOpkRefresh, WireMessage, WireMessageType,
+};
 use op4_core::storage::vault::{PendingOutbound, StoredMessage, VaultUnlocked};
 use rand::rngs::OsRng;
 use serde::{Deserialize, Serialize};
@@ -2114,7 +2116,8 @@ fn broadcast_opk_refresh(vault: &VaultUnlocked, nym: &mut NymClient) {
     };
     for contact in &vault.payload.contacts {
         if !contact.bundle.nym_address.is_empty() {
-            nym.send(&contact.bundle.nym_address, wire_bytes.clone()).ok();
+            nym.send(&contact.bundle.nym_address, wire_bytes.clone())
+                .ok();
         }
     }
 }
