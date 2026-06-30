@@ -40,3 +40,19 @@ cargo build --release
 - Never weaken cryptographic defaults
 - Test on real Tor connections before releasing
 - v0.3.0 shipped; see docs for deferred items (OPKs, build hash, cover traffic)
+
+
+## Git Recon (run before reading code)
+
+```bash
+# Churn hotspots
+git log --format=format: --name-only --since="1 year ago" | sort | uniq -c | sort -nr | head -20
+# Bus factor
+git shortlog -sn --no-merges
+# Bug clusters
+git log -i -E --grep="fix|bug|broken" --name-only --format= | sort | uniq -c | sort -nr | head -20
+# Activity timeline
+git log --format='%ad' --date=format:'%Y-%m' | sort | uniq -c
+# Crisis patterns
+git log --oneline --since="1 year ago" | grep -iE 'revert|hotfix|emergency|rollback'
+```
