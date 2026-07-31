@@ -29,7 +29,7 @@ tor-hsservice = "0.41"
 tor-cell = "0.41"
 safelog = "0.8"
 futures = "0.3"
-rand = "0.8"
+rand = "0.9"
 hkdf = "0.13"
 sha2 = "0.11"
 
