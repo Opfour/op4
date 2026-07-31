@@ -35,7 +35,7 @@ bs58             = "0.5.1"
 
 # Randomness
 rand             = "0.8.5"
-getrandom        = "0.2.15"
+getrandom        = "0.4.2"
 hybrid-array     = "0.4"
 
 # QR code generation (bootstrap contact codes)
