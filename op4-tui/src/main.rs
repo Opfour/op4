@@ -16,6 +16,7 @@ use op4_tui::hardening::memory::apply_memory_hardening;
 use op4_tui::hardening::seccomp::install_seccomp_filter;
 use op4_tui::network::nym_client::NymClient;
 use op4_tui::ui::passphrase::{prompt_new_passphrase, prompt_unlock_passphrase};
+use op4_tui::ui::input::register_termios_signal_handler;
 use x25519_dalek::StaticSecret;
 use zeroize::Zeroizing;
 
@@ -57,6 +58,10 @@ async fn main() {
     };
 
     // ── 4. Vault unlock or first-run setup ────────────────────────────────
+    // Register SIGTERM handler that restores terminal echo if the process
+    // is killed during passphrase input (SIGKILL is uncatchable by design).
+    register_termios_signal_handler();
+
     // All passphrase I/O happens here, in normal terminal mode, before the
     // TUI alternate screen is entered. Passphrase is read from /dev/tty only.
     let mut vault = if vault_path.exists() {

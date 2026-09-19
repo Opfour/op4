@@ -2008,6 +2008,12 @@ fn handle_inbound_revocation(app: &mut AppState, vault: &mut VaultUnlocked, cert
 
     let contact_name = vault.payload.contacts[contact_idx].display_name.clone();
 
+    // Reject stale or replayed certificates: sequence must be strictly
+    // greater than the last applied sequence for this contact.
+    if cert.sequence <= vault.payload.contacts[contact_idx].last_key_seq {
+        return; // Stale certificate — drop silently.
+    }
+
     match cert.new_bundle {
         Some(new_bundle) => {
             // Key rotation: install the new bundle, clear verification status,
@@ -2015,7 +2021,7 @@ fn handle_inbound_revocation(app: &mut AppState, vault: &mut VaultUnlocked, cert
             let new_fingerprint = new_bundle.fingerprint();
             vault.payload.contacts[contact_idx].bundle = new_bundle;
             vault.payload.contacts[contact_idx].verified = false;
-            vault.payload.contacts[contact_idx].last_key_seq += 1;
+            vault.payload.contacts[contact_idx].last_key_seq = cert.sequence;
             app.key_alert = Some((contact_name.clone(), new_fingerprint));
             app.contact_mode = ContactMode::KeyAlert;
             app.tab = Tab::Contacts;

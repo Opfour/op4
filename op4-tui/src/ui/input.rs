@@ -147,6 +147,36 @@ pub fn sanitize_for_display(input: &str) -> String {
     out
 }
 
+/// Register a signal handler for SIGTERM that restores terminal ECHO.
+/// SIGKILL is uncatchable by OS design; this addresses SIGTERM which is
+/// the graceful-termination signal and can be handled safely.
+pub fn register_termios_signal_handler() {
+    // SAFETY: The handler is async-signal-safe — it opens /dev/tty by
+    // path, reads termios with tcgetattr, sets ECHO, writes with
+    // tcsetattr, and closes. No heap allocation, no locks, no std types.
+    unsafe {
+        libc::signal(libc::SIGTERM, sigterm_restore_echo as usize);
+    }
+}
+
+extern "C" fn sigterm_restore_echo(_sig: i32) {
+    // Re-enable ECHO on the controlling terminal so the user is not
+    // left with invisible input after an ungraceful termination.
+    const O_RDWR: i32 = libc::O_RDWR; // 2
+    unsafe {
+        let fd = libc::open(b"/dev/tty\0".as_ptr() as *const i8, O_RDWR);
+        if fd < 0 {
+            return;
+        }
+        let mut tio: libc::termios = std::mem::zeroed();
+        if libc::tcgetattr(fd, &mut tio) == 0 {
+            tio.c_lflag |= libc::ECHO;
+            libc::tcsetattr(fd, libc::TCSANOW, &tio);
+        }
+        libc::close(fd);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

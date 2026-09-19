@@ -37,6 +37,7 @@ pub enum VaultError {
     InvalidMagic,
     InvalidVersion,
     Corrupt,
+    DuressSave,
     Io(std::io::Error),
     Crypto(CryptoError),
 }

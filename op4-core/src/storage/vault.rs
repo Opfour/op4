@@ -394,6 +394,11 @@ impl VaultUnlocked {
     /// file (`<vault_path>.seq`) containing `sequence || HMAC(master_key, sequence)`.
     /// The marker lets `unlock` detect if the vault was replaced with an older copy.
     pub fn save(&mut self) -> Result<(), VaultError> {
+        // Guard: saving in duress mode encrypts the normal section with the
+        // duress key, permanently locking the vault for both passphrases.
+        if self.is_duress {
+            return Err(VaultError::DuressSave);
+        }
         self.payload.sequence += 1;
         let vault_bytes = build_vault_file(
             &self.normal_salt,
@@ -403,7 +408,7 @@ impl VaultUnlocked {
             self.duress_ct.clone(),
         )?;
         write_atomic(&self.path, &vault_bytes)?;
-        write_sequence_marker(&self.path, &self.master_key, self.payload.sequence);
+        write_sequence_marker(&self.path, &self.master_key, self.payload.sequence)?;
         Ok(())
     }
 
@@ -413,7 +418,8 @@ impl VaultUnlocked {
     pub fn check_rollback(&self) -> bool {
         match read_sequence_marker(&self.path, &self.master_key) {
             Some(marker_seq) => self.payload.sequence < marker_seq,
-            None => false, // no marker = first run or marker deleted
+            // Marker deleted on an established vault = rollback alarm.
+            None => self.payload.sequence > 0,
         }
     }
 }
@@ -562,16 +568,18 @@ fn seq_marker_path(vault_path: &Path) -> PathBuf {
 }
 
 /// Write `sequence (8 bytes LE) || HMAC-SHA256(master_key, sequence)` to the
-/// marker file. Best-effort: failure is logged but does not block the save.
-fn write_sequence_marker(vault_path: &Path, key: &SymKey, sequence: u64) {
+/// marker file using atomic write (tmp + rename) so the marker and vault
+/// cannot desynchronise on crash.
+fn write_sequence_marker(vault_path: &Path, key: &SymKey, sequence: u64) -> Result<(), VaultError> {
     use crate::crypto::primitives::hmac_sign_raw;
     let seq_bytes = sequence.to_le_bytes();
     let mac = hmac_sign_raw(&key.0, &seq_bytes);
     let mut data = Vec::with_capacity(8 + 32);
     data.extend_from_slice(&seq_bytes);
     data.extend_from_slice(&mac);
-    // Best-effort write -- failure doesn't block vault save.
-    let _ = fs::write(seq_marker_path(vault_path), &data);
+    // Write atomically so a crash between vault and marker writes cannot
+    // leave the marker behind the vault sequence.
+    write_atomic(&seq_marker_path(vault_path), &data)
 }
 
 /// Read and verify the sequence marker. Returns `Some(sequence)` if the marker
