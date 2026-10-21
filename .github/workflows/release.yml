@@ -39,17 +39,21 @@ jobs:
       - name: Run tests
         run: cargo test --locked
 
+      # Static musl binary so the AppImage does not depend on the host glibc
       - name: Build release binary
-        run: cargo build --release --locked
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --locked --target x86_64-unknown-linux-musl -p op4-tui
 
       - name: Record binary hash
         run: |
-          sha256sum target/release/op4 | tee binary.sha256
-          echo "BINARY_SHA256=$(sha256sum target/release/op4 | cut -d' ' -f1)" >> "$GITHUB_ENV"
-          echo "SOURCE_HASH=$(./target/release/op4 --print-hash)" >> "$GITHUB_ENV"
+          BIN=target/x86_64-unknown-linux-musl/release/op4
+          sha256sum "$BIN" | tee binary.sha256
+          echo "BINARY_SHA256=$(sha256sum "$BIN" | cut -d' ' -f1)" >> "$GITHUB_ENV"
+          echo "SOURCE_HASH=$("$BIN" --print-hash)" >> "$GITHUB_ENV"
 
       - name: Build AppImage
-        run: VERSION="${GITHUB_REF_NAME#v}" bash scripts/build-appimage.sh
+        run: VERSION="${GITHUB_REF_NAME#v}" BINARY=target/x86_64-unknown-linux-musl/release/op4 bash scripts/build-appimage.sh
 
       - name: Create source tarball
         run: |
@@ -113,6 +117,7 @@ jobs:
           files: |
             op4-${{ env.VERSION }}-x86_64.AppImage
             op4-${{ env.VERSION }}-x86_64.AppImage.sha256
+            op4-${{ env.VERSION }}-x86_64.AppImage.zsync
             op4-${{ env.VERSION }}.tar.gz
             op4-${{ env.VERSION }}.tar.gz.sha256
 

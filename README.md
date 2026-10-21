@@ -89,6 +89,7 @@ below for the version you installed.
 
 | Version | Source hash |
 |---|---|
+| `0.3.2` | `43a01bbc404fa6a2fbd9efde624de3b237b7529ffe75a1bd7fe42129164fa813` |
 | `0.3.0` | `80820cb41a63575d2c139dadd425d13d1e87e62a9d60200ae7b894ae2e9ad8ed` |
 | `0.3.1` | `48115efb12747fa78b627ddbf7a56c46169f59e777d7d7508941bf89e4fe7521` |
 | `0.2.0-dev` | `35740577f6c4a4f19c5a08fe85b1f78a10347f2ba9dd7642d126552266bfa5a5` |

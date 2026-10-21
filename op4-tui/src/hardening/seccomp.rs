@@ -105,6 +105,7 @@ fn build_filter() -> Result<BpfProgram, String> {
         libc::SYS_pread64,
         libc::SYS_pwrite64,
         libc::SYS_openat,
+        libc::SYS_open, // musl (static AppImage build) uses open(2), not openat(2)
         libc::SYS_close,
         libc::SYS_fstat,
         libc::SYS_stat,
