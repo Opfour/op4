@@ -13,7 +13,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-BINARY="target/release/op4"
+BINARY="${BINARY:-target/release/op4}"
 APPDIR="build/AppDir"
 APPIMAGETOOL="build/appimagetool-x86_64.AppImage"
 VERSION="${VERSION:-$(grep '^version' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')}"
@@ -67,7 +67,10 @@ chmod +x "$APPDIR/AppRun"
 # ── Build the AppImage ──────────────────────────────────────────────────────
 
 echo "[+] Packaging AppImage..."
-ARCH=x86_64 "$APPIMAGETOOL" "$APPDIR" "op4-${VERSION}-x86_64.AppImage" 2>&1
+# Embed update info so AppImageUpdate can fetch new releases; also writes the .zsync file
+ARCH=x86_64 "$APPIMAGETOOL" \
+    -u "gh-releases-zsync|Opfour|op4|latest|op4-*-x86_64.AppImage.zsync" \
+    "$APPDIR" "op4-${VERSION}-x86_64.AppImage" 2>&1
 
 # Generate checksum
 sha256sum "op4-${VERSION}-x86_64.AppImage" > "op4-${VERSION}-x86_64.AppImage.sha256"
@@ -75,5 +78,6 @@ sha256sum "op4-${VERSION}-x86_64.AppImage" > "op4-${VERSION}-x86_64.AppImage.sha
 echo ""
 echo "[ok] AppImage built: op4-${VERSION}-x86_64.AppImage"
 echo "     Checksum:       op4-${VERSION}-x86_64.AppImage.sha256"
+echo "     Update file:    op4-${VERSION}-x86_64.AppImage.zsync"
 echo ""
 cat "op4-${VERSION}-x86_64.AppImage.sha256"
