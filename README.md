@@ -2,7 +2,7 @@
 </br>
 </br>
 
-<b>op4 — Secure Terminal Messenger</b>
+# op4 — Secure Terminal Messenger
 
 Op4 is a terminal-based encrypted messaging application written in Rust.
 It provides end-to-end encrypted private messaging with post-quantum
