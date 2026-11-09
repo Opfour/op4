@@ -32,7 +32,7 @@ Thumbs.db
 
 # Build scripts output
 /install/.built
-.claude/settings.local.json
+.claude/
 
 # OpenClaw credentials
 .openclaw/
